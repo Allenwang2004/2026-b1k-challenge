@@ -115,6 +115,13 @@ def create_behavior_dataset(data_config: _config.DataConfig, action_horizon: int
     "freeze_pies",
     ]
     
+    if data_config.behavior_tasks is not None:
+        unknown = sorted(set(data_config.behavior_tasks) - set(tasks))
+        if unknown:
+            raise ValueError(f"behavior_tasks names no such challenge task: {unknown}")
+        tasks = list(data_config.behavior_tasks)
+        logging.info(f"Restricting training to tasks {tasks} (DataConfig.behavior_tasks)")
+
     dataset = BehaviorLeRobotDataset(
         repo_id=data_config.repo_id,
         root=data_config.behavior_dataset_root,

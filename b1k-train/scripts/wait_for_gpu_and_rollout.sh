@@ -24,6 +24,7 @@ RUN_NAME="${RUN_NAME:-rlc_ckpt2_task1_$(date +%Y%m%d)}"
 TEAM="${TEAM:-RLC-checkpoint2}"                    # --team written into submission.json
 EVAL_RUNS="${EVAL_RUNS:-$EVAL_ROOT/eval_runs}"
 CKPT="${CKPT:-$EVAL_ROOT/behavior_checkpoints/ilia/checkpoint_2}"   # ckpt 2 covers task 1
+POLICY_CONFIG="${POLICY_CONFIG:-pi_behavior_b1k_fast}"   # must be the config the checkpoint was trained with
 PORT="${PORT:-8010}"
 POLICY_VENV="${POLICY_VENV:-$EVAL_ROOT/b1k-evaluation/baselines/openpi/.venv}"
 DATA_PATH="${DATA_PATH:-$EVAL_ROOT/BEHAVIOR-1K/datasets}"
@@ -86,7 +87,7 @@ while true; do
     CUDA_VISIBLE_DEVICES="$SERVER_GPU" XLA_PYTHON_CLIENT_PREALLOCATE=true XLA_PYTHON_CLIENT_MEM_FRACTION="$POLICY_MEM_FRACTION" \
     TORCHDYNAMO_DISABLE=1 OMNIGIBSON_DATA_PATH="$DATA_PATH" L1_STAGE_LOG_DIR="$EVAL_RUNS/$RUN_NAME/stage_logs" \
     "$POLICY_VENV/bin/python" -P "$ROOT/$SERVE_SCRIPT" --solution-repo "$ROOT" --port "$PORT" \
-        policy:checkpoint --policy.config pi_behavior_b1k_fast --policy.dir "$CKPT" > "$SERVE_LOG" 2>&1 &
+        policy:checkpoint --policy.config "$POLICY_CONFIG" --policy.dir "$CKPT" > "$SERVE_LOG" 2>&1 &
     SERVER_PID=$!
     echo "$SERVER_PID" > outputs/ilia_serve.pid
     log "policy server pid ${SERVER_PID}, log ${SERVE_LOG}"

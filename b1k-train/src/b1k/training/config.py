@@ -84,6 +84,13 @@ class DataConfig:
     # Only used for B1K data loader.
     behavior_dataset_root: str | None = None
 
+    # Restrict training to these tasks, by the dataset's task names (e.g. ("sorting_vegetables",)).
+    # None keeps the historical behaviour: offer the loader all 50 challenge tasks and train on
+    # whichever ones happen to be downloaded. That is convenient but silent -- adding a task's demos
+    # to behavior_dataset_root changes what an existing config trains on -- so single-task runs
+    # should name their task here.
+    behavior_tasks: Sequence[str] | None = None
+
     # Per-frame BDDL stage labels (scripts/build_bddl_stage_labels.py). When set, the data loader adds
     # an AttachBDDLStage transform that puts the symbolic task progress in data["bddl_stage"]. The
     # heuristic time-split stage (ComputeSubtaskStateFromMeta -> "subtask_state") is untouched.
@@ -370,6 +377,7 @@ _CONFIGS = [
             base_config=DataConfig(
                 prompt_from_task=False,  # No text prompts for PI_BEHAVIOR
                 behavior_dataset_root="/home/b1k-challenge/evaluation/train_set/2026-challenge-demos",
+                behavior_tasks=("picking_up_trash",),
                 use_per_timestamp_norm=True,  # Enable per-timestamp normalization
             ),
             use_delta_joint_actions=True,
@@ -419,6 +427,7 @@ _CONFIGS = [
             base_config=DataConfig(
                 prompt_from_task=False,
                 behavior_dataset_root="/home/b1k-challenge/evaluation/train_set/2026-challenge-demos",
+                behavior_tasks=("picking_up_trash",),
                 use_per_timestamp_norm=True,
             ),
             use_delta_joint_actions=True,
@@ -476,6 +485,7 @@ _CONFIGS = [
             base_config=DataConfig(
                 prompt_from_task=False,
                 behavior_dataset_root="/home/b1k-challenge/evaluation/train_set/2026-challenge-demos",
+                behavior_tasks=("picking_up_trash",),
                 use_per_timestamp_norm=True,
                 bddl_stage_labels_path=(
                     "/home/b1k-challenge/evaluation/b1k-train/outputs/assets/"
@@ -501,6 +511,190 @@ _CONFIGS = [
         num_workers=80,
         save_interval=2000,
         keep_period=10_000,
+    ),
+    # Same as pi_behavior_b1k_bddl_ckpt2 but stopped at 2500 steps, to test whether the 20000-step
+    # finetune overfits: at 20000 steps action_loss had fallen to 0.1530 (from 0.3069 at 2500) while
+    # every one of 10 rollouts failed, which is what an overfit policy looks like. The LR schedule is
+    # compressed to match (decay_steps 20000 -> 2500) so the short run still warms up and anneals to
+    # 1e-5 instead of stopping at peak LR -- it gets its best shot, so a bad result here is evidence
+    # against the overfitting explanation rather than an artefact of an un-annealed checkpoint.
+    TrainConfig(
+        name="pi_behavior_b1k_bddl_ckpt2_2500",
+        exp_name="openpi",
+        project_name="B1K",
+        model=pi_behavior_config.PiBehaviorConfig(
+            action_horizon=30,
+            action_dim=32,
+            use_correlated_noise=True,
+            correlation_beta=0.5,
+            use_fast_auxiliary=True,
+            fast_loss_weight=0.05,
+            fast_encoded_dims="0:6,7:23",
+            fast_vocab_size=1024,
+            max_fast_tokens=200,
+            use_kv_transform=True,
+            use_knowledge_insulation=False,
+            subtask_loss_weight=0.1,
+            freeze_vision_backbone=True,
+            use_bddl_stage=True,
+        ),
+        data=LeRobotB1KDataConfig(
+            repo_id="behavior-1k/2026-challenge-demos",
+            base_config=DataConfig(
+                prompt_from_task=False,
+                behavior_dataset_root="/home/b1k-challenge/evaluation/train_set/2026-challenge-demos",
+                behavior_tasks=("picking_up_trash",),
+                use_per_timestamp_norm=True,
+                bddl_stage_labels_path=(
+                    "/home/b1k-challenge/evaluation/b1k-train/outputs/assets/"
+                    "bddl_stage_labels/2026-challenge-demos.npz"
+                ),
+            ),
+            use_delta_joint_actions=True,
+            use_fast_tokenization=True,
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1000,
+            peak_lr=1e-4,
+            decay_steps=2_500,
+            decay_lr=1e-5,
+        ),
+        num_flow_samples=15,
+        weight_loader=weight_loaders.PiBehaviorWeightLoader(
+            "/home/b1k-challenge/evaluation/behavior_checkpoints/ilia/checkpoint_2/params"
+        ),
+        num_train_steps=2_500,
+        assets_base_dir="./outputs/assets",
+        checkpoint_base_dir="./outputs/checkpoints",
+        num_workers=80,
+        save_interval=2500,
+        keep_period=100_000,
+    ),
+    # Diagnostic arm for "does peak_lr=1e-4 wreck the checkpoint it starts from?".
+    #
+    # Both earlier BDDL runs bottom out at action_loss 0.187 around step 200 -- where the LR is still
+    # ~2e-5 and param_norm has moved 0.0004% off checkpoint_2 -- and then climb 71% as warmup drives
+    # the LR to 1e-4; the 20000-step run needs 13800 steps to get back. This arm holds everything
+    # else fixed (same data, same BDDL labels, same init) and only lowers the LR to the value at
+    # which the loss was lowest, reaching it in 200 steps and staying flat there over the window we
+    # compare. If the loss still climbs, the climb is the model adapting to its new conditioning and
+    # the LR is exonerated; if it declines, the climb was the optimizer damaging the checkpoint.
+    # It saves nothing (save_interval is huge) -- only the first ~1000 steps of the curve are wanted.
+    TrainConfig(
+        name="pi_behavior_b1k_bddl_ckpt2_lr2e5",
+        exp_name="openpi",
+        project_name="B1K",
+        model=pi_behavior_config.PiBehaviorConfig(
+            action_horizon=30,
+            action_dim=32,
+            use_correlated_noise=True,
+            correlation_beta=0.5,
+            use_fast_auxiliary=True,
+            fast_loss_weight=0.05,
+            fast_encoded_dims="0:6,7:23",
+            fast_vocab_size=1024,
+            max_fast_tokens=200,
+            use_kv_transform=True,
+            use_knowledge_insulation=False,
+            subtask_loss_weight=0.1,
+            freeze_vision_backbone=True,
+            use_bddl_stage=True,
+        ),
+        data=LeRobotB1KDataConfig(
+            repo_id="behavior-1k/2026-challenge-demos",
+            base_config=DataConfig(
+                prompt_from_task=False,
+                behavior_dataset_root="/home/b1k-challenge/evaluation/train_set/2026-challenge-demos",
+                behavior_tasks=("picking_up_trash",),
+                use_per_timestamp_norm=True,
+                bddl_stage_labels_path=(
+                    "/home/b1k-challenge/evaluation/b1k-train/outputs/assets/"
+                    "bddl_stage_labels/2026-challenge-demos.npz"
+                ),
+            ),
+            use_delta_joint_actions=True,
+            use_fast_tokenization=True,
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=200,
+            peak_lr=2e-5,
+            decay_steps=20_000,
+            decay_lr=2e-6,
+        ),
+        num_flow_samples=15,
+        weight_loader=weight_loaders.PiBehaviorWeightLoader(
+            "/home/b1k-challenge/evaluation/behavior_checkpoints/ilia/checkpoint_2/params"
+        ),
+        num_train_steps=20_000,
+        assets_base_dir="./outputs/assets",
+        checkpoint_base_dir="./outputs/checkpoints",
+        num_workers=80,
+        save_interval=1_000_000,
+        keep_period=100_000,
+    ),
+    # Second task with the identical BDDL recipe. Everything below is copied verbatim from
+    # pi_behavior_b1k_bddl_ckpt2_lr2e5 except behavior_tasks and bddl_stage_labels_path, so any
+    # difference in the result is attributable to the task, not the recipe.
+    #
+    # sorting_vegetables (task 20) is a useful second point precisely because it does NOT share
+    # task 1's confound: it has 14 BDDL stages and 14 time-split stages, so the "BDDL gives the
+    # policy fewer stages than the champion had" difference disappears here. The champion scores
+    # q=0.477 on it (public) with a 0.00 success rate, versus q=0.667 / 0.40 on picking_up_trash.
+    #
+    # Its labels live in their own .npz: build_bddl_stage_labels.py overwrites its output, so
+    # regenerating into the shared file would have rewritten task 1's labels underneath the
+    # existing lr2e5 run.
+    TrainConfig(
+        name="pi_behavior_b1k_bddl_ckpt2_lr2e5_task20",
+        exp_name="openpi",
+        project_name="B1K",
+        model=pi_behavior_config.PiBehaviorConfig(
+            action_horizon=30,
+            action_dim=32,
+            use_correlated_noise=True,
+            correlation_beta=0.5,
+            use_fast_auxiliary=True,
+            fast_loss_weight=0.05,
+            fast_encoded_dims="0:6,7:23",
+            fast_vocab_size=1024,
+            max_fast_tokens=200,
+            use_kv_transform=True,
+            use_knowledge_insulation=False,
+            subtask_loss_weight=0.1,
+            freeze_vision_backbone=True,
+            use_bddl_stage=True,
+        ),
+        data=LeRobotB1KDataConfig(
+            repo_id="behavior-1k/2026-challenge-demos",
+            base_config=DataConfig(
+                prompt_from_task=False,
+                behavior_dataset_root="/home/b1k-challenge/evaluation/train_set/2026-challenge-demos",
+                behavior_tasks=("sorting_vegetables",),
+                use_per_timestamp_norm=True,
+                bddl_stage_labels_path=(
+                    "/home/b1k-challenge/evaluation/b1k-train/outputs/assets/"
+                    "bddl_stage_labels/2026-challenge-demos_task20.npz"
+                ),
+            ),
+            use_delta_joint_actions=True,
+            use_fast_tokenization=True,
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=200,
+            peak_lr=2e-5,
+            decay_steps=20_000,
+            decay_lr=2e-6,
+        ),
+        num_flow_samples=15,
+        weight_loader=weight_loaders.PiBehaviorWeightLoader(
+            "/home/b1k-challenge/evaluation/behavior_checkpoints/ilia/checkpoint_2/params"
+        ),
+        num_train_steps=20_000,
+        assets_base_dir="./outputs/assets",
+        checkpoint_base_dir="./outputs/checkpoints",
+        num_workers=80,
+        save_interval=1_000_000,
+        keep_period=100_000,
     ),
 ]
 

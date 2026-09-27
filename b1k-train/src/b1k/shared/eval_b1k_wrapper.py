@@ -10,7 +10,7 @@ from collections import deque
 from openpi_client.base_policy import BasePolicy
 from openpi_client.image_tools import resize_with_pad
 from b1k.policies.b1k_policy import extract_state_from_proprio
-from b1k.models.pi_behavior_config import TASK_NUM_STAGES
+from b1k.models.pi_behavior_config import BDDL_TASK_NUM_STAGES, TASK_NUM_STAGES
 from b1k.shared.correction_rules import apply_correction_rules, check_gripper_variation
 from b1k.shared.proprio import PROPRIOCEPTION_INDICES  # 2026 R1Pro layout, vendored (no OmniGibson needed)
 
@@ -35,6 +35,20 @@ class B1KWrapperConfig:
     time_threshold_inpaint: float = 0.3
     num_steps: int = 20
     apply_eval_tricks: bool = True
+    # Must match the served checkpoint's model config. With use_bddl_stage the model is conditioned
+    # on the BDDL symbolic progress (how many goal literals hold) rather than on the time-split
+    # stage: tokenized_prompt gains a third slot for it, the time-split slot is pinned to 0 exactly
+    # as in training, and the VLM's stage head -- whose logits drive the voting below -- predicts
+    # the symbolic stage, so the per-task stage counts come from BDDL_TASK_NUM_STAGES.
+    use_bddl_stage: bool = False
+    # Never condition the policy on the terminal stage. The evaluator ends an episode the instant the
+    # goal really holds, so while an episode is still running the task is by definition unfinished and
+    # a terminal-stage reading can only be a false positive -- and acting on it tells the policy it is
+    # done, so it stops. In the 2026-09-26 run 5 of the 6 failures sat at the terminal stage for
+    # 49-73% of the episode (instance 304 with nothing in the bin at all), burning 3862-5742 steps.
+    # Only applied where there is a stage left to fall back to (>= 3 stages); with 2 stages the clamp
+    # would pin the signal to 0, which the fixed0 ablation showed destroys the policy.
+    cap_terminal_stage: bool = True
 
 
 class B1KPolicyWrapper():
@@ -74,6 +88,11 @@ class B1KPolicyWrapper():
         self.prediction_count = 0
         self.next_initial_actions = None
     
+    def num_stages(self, task_id: int) -> int:
+        """Stages this task has, under whichever stage definition the served model was trained on."""
+        counts = BDDL_TASK_NUM_STAGES if self.config.use_bddl_stage else TASK_NUM_STAGES
+        return counts[task_id]
+
     def reset(self):
         """Reset policy state."""
         self.policy.reset()
@@ -92,7 +111,7 @@ class B1KPolicyWrapper():
             old_task_id = self.task_id
             self.task_id = new_task_id
             
-            logger.info(f"🔄 Task change detected: {old_task_id} → {new_task_id} (max stages: {TASK_NUM_STAGES[new_task_id]})")
+            logger.info(f"🔄 Task change detected: {old_task_id} → {new_task_id} (max stages: {self.num_stages(new_task_id)})")
             
             if self.checkpoint_switcher:
                 new_policy = self.checkpoint_switcher.get_policy_for_task(new_task_id)
@@ -134,7 +153,7 @@ class B1KPolicyWrapper():
         if self.task_id is None:
             return
             
-        max_stage = TASK_NUM_STAGES[self.task_id] - 1
+        max_stage = self.num_stages(self.task_id) - 1
         predicted_stage = int(np.argmax(predicted_subtask_logits))
         
         if predicted_stage > max_stage:
@@ -167,11 +186,25 @@ class B1KPolicyWrapper():
                     logger.info(f"⬅️  Stage went back: {old_stage} → {self.current_stage} (task {self.task_id}, step {self.step_count})")
     
     def _stage_for_model(self) -> int:
-        """The stage the model is conditioned on (== tracked stage unless B1K_STAGE_OVERRIDE is set)."""
-        if STAGE_OVERRIDE is None or self.task_id is None:
+        """The stage the model is conditioned on.
+
+        Clamped below the terminal stage (see B1KWrapperConfig.cap_terminal_stage); the tracked stage
+        itself is left alone so the logs still show what the VLM believed. B1K_STAGE_OVERRIDE bypasses
+        the clamp -- it exists to feed a deliberately wrong stage, so it must not be second-guessed.
+        """
+        if self.task_id is None:
             return self.current_stage
+        max_stage = self.num_stages(self.task_id) - 1
+        if STAGE_OVERRIDE is None:
+            cap = max_stage - 1 if (self.config.cap_terminal_stage and max_stage >= 2) else max_stage
+            stage = min(self.current_stage, cap)
+            if stage != self.current_stage and self.prediction_count % 25 == 0:
+                logger.info(
+                    f"⛔ stage clamped {self.current_stage} -> {stage} (terminal stage cannot hold "
+                    f"while the episode is still running; task {self.task_id}, step {self.step_count})"
+                )
+            return stage
         mode, value = STAGE_OVERRIDE.split(":")
-        max_stage = TASK_NUM_STAGES[self.task_id] - 1
         if mode == "fixed":
             stage = int(value)
         elif mode == "shift":
@@ -190,8 +223,13 @@ class B1KPolicyWrapper():
         stage = self._stage_for_model()
         if STAGE_OVERRIDE is not None and self.prediction_count % 10 == 0:
             logger.info(f"🧪 Stage override {STAGE_OVERRIDE}: model sees stage {stage}, tracked stage {self.current_stage}")
-        batch_copy["tokenized_prompt"] = np.array([task_id, stage], dtype=np.int32)
-        batch_copy["tokenized_prompt_mask"] = np.array([True, True], dtype=bool)
+        if self.config.use_bddl_stage:
+            # [task_id, time-split stage (pinned to 0, as in training), BDDL symbolic stage]
+            entries = [task_id, 0, stage]
+        else:
+            entries = [task_id, stage]
+        batch_copy["tokenized_prompt"] = np.array(entries, dtype=np.int32)
+        batch_copy["tokenized_prompt_mask"] = np.ones(len(entries), dtype=bool)
         batch_copy["subtask_state"] = np.array(stage, dtype=np.int32)
         
         return batch_copy
@@ -319,7 +357,7 @@ class B1KPolicyWrapper():
         
         # Log progress every 100 steps
         if self.step_count % 100 == 0:
-            logger.info(f"📊 Step {self.step_count} | Task: {self.task_id} | Stage: {self.current_stage}/{TASK_NUM_STAGES[self.task_id]-1} | Predictions: {self.prediction_count}")
+            logger.info(f"📊 Step {self.step_count} | Task: {self.task_id} | Stage: {self.current_stage}/{self.num_stages(self.task_id)-1} | Predictions: {self.prediction_count}")
         
         # Convert to torch tensor
         action_tensor = torch.from_numpy(current_action).float()

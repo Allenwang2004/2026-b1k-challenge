@@ -28,3 +28,5 @@ wandb/
 
 # ---- sim_eval_kit runtime state (container HOME / app data) ----
 /sim_eval_kit/
+
+/b1k-lora

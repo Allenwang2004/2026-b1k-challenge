@@ -149,7 +149,22 @@ def main(args: Args) -> None:
         time_threshold_inpaint=args.time_threshold_inpaint,
         num_steps=args.num_steps,
         apply_eval_tricks=args.apply_eval_tricks,
+        # Take it from the served checkpoint's own config: a model trained with the BDDL symbolic
+        # stage needs a three-slot tokenized_prompt and the BDDL per-task stage counts, and getting
+        # this wrong is silent -- the wrapper would feed a stage the model never saw.
+        use_bddl_stage=getattr(config.model, "use_bddl_stage", False),
     )
+
+    if wrapper_config.use_bddl_stage:
+        logging.info("BDDL stage conditioning ON: tokenized_prompt = [task_id, 0, bddl_stage]")
+        if args.apply_eval_tricks:
+            from b1k.shared.correction_rules import MIN_STAGE_FOR_CLOSURE
+            stage_coupled = sorted(set(MIN_STAGE_FOR_CLOSURE) | {0})
+            logging.warning(
+                "Correction rules that key on a stage number (tasks %s) were written for the "
+                "time-split stages and mean something else under BDDL stages. Harmless for tasks "
+                "outside that list; review before evaluating one of them.", stage_coupled
+            )
     
     logging.info(f"Wrapper config: execute={wrapper_config.actions_to_execute}, keep={wrapper_config.actions_to_keep}, steps={wrapper_config.execute_in_n_steps}, num_steps={wrapper_config.num_steps}")
     
