@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- TODO(placeholder): final project title -->
+  <title>Grounded Stage Tracking</title>
+  <meta name="description" content="Grounding a VLA policy's task-stage signal in BDDL goal literals for the BEHAVIOR-1K 2026 Challenge.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Source+Serif+4:opsz,wght@8..60,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="static/css/style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="wrap">
+    <a class="brand" href="#top">Grounded Stage Tracking</a>
+    <a href="#challenge">Challenge</a>
+    <a href="#method">Method</a>
+    <a href="#results">Results</a>
+    <a href="#analysis">Analysis</a>
+    <a href="#next">Next: Event Head</a>
+    <a href="#caveats">Caveats</a>
+    <a href="#team">Team</a>
+  </div>
+</nav>
+
+<header class="hero" id="top">
+  <div class="wrap">
+    <div class="venue">BEHAVIOR-1K Challenge 2026</div>
+    <!-- TODO(placeholder): final title -->
+    <h1><span class="placeholder">[Project Title]</span><br>Grounding Task Stages in Symbolic Goals</h1>
+    <p class="subtitle">A vision-language-action policy that tracks progress by counting satisfied BDDL goal literals instead of guessing how far into the episode it is.</p>
+    <!-- TODO(placeholder): authors and affiliations -->
+    <p class="authors"><span class="placeholder">Author One</span><sup>1</sup>, <span class="placeholder">Author Two</span><sup>1</sup>, <span class="placeholder">Author Three</span><sup>2</sup></p>
+    <p class="affil"><sup>1</sup><span class="placeholder">Affiliation</span> &nbsp; <sup>2</sup><span class="placeholder">Affiliation</span></p>
+    <div class="buttons">
+      <!-- TODO(placeholder): set href once the repo is public -->
+      <a class="btn" href="#" aria-disabled="true">
+        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        Code (soon)
+      </a>
+      <a class="btn" href="#" aria-disabled="true">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 1.5h5.5L13 5v9.5H4z"/><path d="M9 1.5V5.5h4"/></svg>
+        Report (soon)
+      </a>
+      <a class="btn ghost" href="https://behavior.stanford.edu/challenge/" target="_blank" rel="noopener">Challenge</a>
+      <a class="btn ghost" href="https://robot-learning-collective.github.io/winning-behavior-1k-challenge" target="_blank" rel="noopener">2025 solution we build on</a>
+    </div>
+
+    <div class="teaser">
+      <video src="static/videos/trash_309.mp4" poster="static/videos/trash_309.jpg" autoplay muted loop playsinline></video>
+      <p class="caption center">Our policy completing <code>picking_up_trash</code> (public instance 309) at 8&times; speed. Left: wrist cameras. Right: head camera.</p>
+    </div>
+
+    <div class="stats">
+      <div class="stat"><div class="v accent">0.733</div><div class="l">q-score on <code>picking_up_trash</code>, 10 public instances</div></div>
+      <div class="stat"><div class="v accent">4 / 10</div><div class="l">full successes on the same task</div></div>
+      <div class="stat"><div class="v">0</div><div class="l">quantities the stage signal needs that are unknown at test time (was 1)</div></div>
+      <div class="stat"><div class="v">free</div><div class="l">ground truth for stage prediction: every rollout's q-score gives it exactly</div></div>
+    </div>
+  </div>
+</header>
+
+<!-- ================================================================== -->
+<section id="intro">
+  <div class="wrap">
+    <h2>TL;DR</h2>
+    <p>The 2025 winning solution conditions its action expert on a <em>task stage</em>: an integer saying which phase of the task the robot is in. That integer was defined as a fixed fraction of the episode's total length. At test time the episode length is unknown, so the policy was trained to predict a target it can never observe.</p>
+    <p>We redefine the stage as <strong>the number of BDDL goal literals currently satisfied</strong>. This is a function of the world state, so it is defined at every instant, both in training and at deployment. It is also exactly what the benchmark scores. On <code>picking_up_trash</code> the retrained policy reaches <strong>q = 0.733 with 4/10 successes</strong>.</p>
+    <p>On long-horizon tasks the stage predictor still fails, and we can say why. The demonstrations never contain a moment where nothing is happening, so the model never learns to answer "no progress yet". Our next change, <a href="#next">a two-frame event head</a>, targets exactly that. This page reports what works, what does not, and what we are testing now.</p>
+  </div>
+</section>
+
+<!-- ================================================================== -->
+<section id="challenge">
+  <div class="wrap">
+    <h2>The Challenge</h2>
+    <p class="lede">A mobile bimanual robot must complete long household activities in the OmniGibson simulator, using only its cameras and its own joint readings.</p>
+    <p>The 2026 edition covers 100 activities from BEHAVIOR-1K. Each activity is defined in BDDL, a symbolic language. The goal is a conjunction of literals such as <code>inside(carrot_1, bowl_1)</code> or <code>not open(cabinet_1)</code>. An episode is scored by <strong>q-score</strong>, the fraction of goal literals satisfied when it ends. It counts as a <strong>success</strong> only if all of them are satisfied.</p>
+    <ul>
+      <li><strong>Long horizon.</strong> Episodes run for up to several minutes of simulated time. <code>sorting_vegetables</code> has a 10-minute cap and 13 goal literals.</li>
+      <li><strong>Non-Markovian.</strong> Two moments can look alike to the cameras but call for different actions: before the first item is placed and after the last, the scene can look much the same. The policy needs some notion of progress.</li>
+      <li><strong>Mobile and bimanual.</strong> Navigation, two-arm manipulation and articulated objects all appear within a single episode.</li>
+      <li><strong>Expensive evaluation.</strong> At our measured ~0.2 s per simulator step, one pass over all 100 tasks &times; 10 public instances is on the order of 900 GPU-hours.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================================================================== -->
+<section id="method">
+  <div class="wrap">
+    <h2>Method</h2>
+
+    <h3>Starting point</h3>
+    <p>We build on the <a href="https://robot-learning-collective.github.io/winning-behavior-1k-challenge" target="_blank" rel="noopener">winning 2025 solution</a> (Larchenko et al., <a href="https://arxiv.org/abs/2512.06951" target="_blank" rel="noopener">arXiv:2512.06951</a>). It is a Pi0.5 VLA (SigLIP vision encoder with a Gemma backbone) that replaces the text prompt with learned task embeddings. Its "System 2" predicts the current task stage, and the predictions pass through a voting tracker. The tracked stage is embedded and fed back to the action expert. We start from the released checkpoints, port the data pipeline to the 2026 demonstrations, and change only what the stage <em>means</em>.</p>
+
+    <figure>
+      <div class="frame">
+        <div class="pipe">
+          <div class="node"><b>Observations</b>head + 2 wrist RGB, proprioception, task id</div>
+          <div class="arrow">&rarr;</div>
+          <div class="node"><b>Pi0.5 VLM</b>SigLIP + Gemma prefix</div>
+          <div class="arrow">&rarr;</div>
+          <div class="node new"><b>Stage head</b>predicts # satisfied BDDL literals</div>
+          <div class="arrow">&rarr;</div>
+          <div class="node"><b>Stage tracker</b>votes &rarr; current stage <br><small>(never terminal)</small></div>
+          <div class="arrow">&rarr;</div>
+          <div class="node"><b>Action expert</b>flow matching, conditioned on stage</div>
+        </div>
+      </div>
+      <figcaption><strong>Figure 1.</strong> Policy overview. The architecture is unchanged from the 2025 solution. The highlighted stage head is trained on a new target (below).</figcaption>
+    </figure>
+
+    <h3>The problem: a stage that cannot be computed at test time</h3>
+    <p>In the original solution the stage label for demonstration frame <code>t</code> is:</p>
+<pre><code>stage = floor(num_stages &times; t / episode_length)</code></pre>
+    <p>This requires <code>episode_length</code>, the <em>total</em> length of the episode. It exists only in the offline dataset, after the fact. During a rollout it is undefined. The head is supervised on elapsed-time fractions, but it is asked to report progress in a world where "elapsed fraction" has no referent. Whatever it learns, it is not the quantity it was trained on.</p>
+
+    <h3>Our fix: count satisfied goal literals</h3>
+<pre><code>stage = number of BDDL goal literals satisfied in the current state</code></pre>
+    <p>The simulator already evaluates these literals, because that is how the benchmark scores an episode. We replay every demonstration, evaluate the goal every 30 simulator steps, and store the count as a per-frame label. The stage now changes when something actually happens, not when a clock ticks over.</p>
+
+    <figure>
+      <div class="frame">
+        <div class="tl-row">
+          <div class="lab">Time-split stage<br><small>(2025 baseline)</small></div>
+          <div class="tl-bar tl-time">
+            <div style="flex:1">0</div><div style="flex:1">1</div><div style="flex:1">2</div><div style="flex:1">3</div>
+          </div>
+        </div>
+        <div class="tl-row">
+          <div class="lab">BDDL stage<br><small>(ours)</small></div>
+          <div class="tl-bar tl-bddl">
+            <div style="flex:38">0</div><div style="flex:17">1</div><div style="flex:30">2</div><div style="flex:15">3</div>
+          </div>
+        </div>
+        <div class="tl-row">
+          <div class="lab"></div>
+          <div class="tl-events">
+            <span style="left:38%">trash_1<br>in bin</span>
+            <span style="left:55%">trash_2<br>in bin</span>
+            <span style="left:85%">trash_3<br>in bin</span>
+          </div>
+        </div>
+      </div>
+      <figcaption><strong>Figure 2.</strong> Illustration of one demonstration of <code>picking_up_trash</code>. Time-split boundaries fall wherever the clock puts them. BDDL boundaries fall exactly where a goal literal becomes true. Durations are illustrative.</figcaption>
+    </figure>
+
+    <div class="compare">
+      <div class="card">
+        <h4>Time-split stage</h4>
+        <p class="bad">Needs the episode's total length &rarr; undefined during a rollout.</p>
+        <p class="bad">Same label for "walking to the bin" and "dropping the item" whenever they fall in the same time slice.</p>
+      </div>
+      <div class="card">
+        <h4>BDDL stage</h4>
+        <p>A function of the observable world state &rarr; defined at every instant, in training and at inference alike.</p>
+        <p>Measures the same thing the benchmark scores.</p>
+      </div>
+    </div>
+
+    <h3>A free, exact evaluation signal</h3>
+    <p>The q-score is the fraction of satisfied literals, so for a task with <em>N</em> goal literals, <code>q_score &times; N</code> gives the stage an episode ended in, exactly, as an integer. <strong>Every rollout we have ever run is therefore labelled ground truth for the stage predictor.</strong> We can measure stage-prediction changes offline from logged rollouts without spending simulation time. The analysis below uses this signal.</p>
+
+    <h3>Terminal-stage clamp</h3>
+    <p>The evaluator ends an episode as soon as every literal holds. So while an episode is still running, a reading of the terminal stage can only be a false positive. Acting on it tells the policy it is done, and it stops. We never condition the action expert on the terminal stage: the tracked stage is clamped to <em>N</em>&minus;1 for tasks with three or more stages.</p>
+  </div>
+</section>
+
+<!-- ================================================================== -->
+<section id="results">
+  <div class="wrap">
+    <h2>Results</h2>
+    <p class="lede">All numbers are single runs over the 10 public test instances (301&ndash;310) of each task. See <a href="#caveats">Caveats</a> for run-to-run variance.</p>
+
+    <h3><code>picking_up_trash</code> &nbsp;<small style="color:var(--fg-muted);font-weight:500">3 goal literals &middot; 4 stages</small></h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Configuration</th><th class="num">q-score</th><th class="num">Success rate</th></tr></thead>
+        <tbody>
+          <tr><td>Ours: BDDL stage conditioning</td><td class="num">0.667</td><td class="num">0.40</td></tr>
+          <tr class="hl"><td>Ours: BDDL + terminal-stage clamp</td><td class="num">0.733</td><td class="num">0.40</td></tr>
+          <tr class="muted"><td>2026 public leaderboard, best entry (100-task average, for scale only)</td><td class="num">0.322</td><td class="num">0.148</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>The leaderboard figure averages all 100 tasks, while ours is a single task. We show it for scale, not as a like-for-like comparison.</p>
+
+    <h3><code>sorting_vegetables</code> &nbsp;<small style="color:var(--fg-muted);font-weight:500">13 goal literals &middot; 14 stages</small></h3>
+    <p>We retrained with an identical recipe, changing only the task and its label file.</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th></th><th class="num"><code>picking_up_trash</code></th><th class="num"><code>sorting_vegetables</code></th></tr></thead>
+        <tbody>
+          <tr><td>BDDL stages</td><td class="num">4</td><td class="num">14</td></tr>
+          <tr><td>Stage accuracy (training)</td><td class="num">0.996</td><td class="num">0.986</td></tr>
+          <tr><td>Action loss (training)</td><td class="num">0.086</td><td class="num">0.184</td></tr>
+          <tr class="hl"><td>Rollout q-score</td><td class="num">0.667</td><td class="num">0.354</td></tr>
+          <tr><td>Success rate</td><td class="num">0.40</td><td class="num">0.00</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="callout">
+      <p>Training metrics are nearly identical across the two tasks, yet rollout q-score differs by a factor of two. <strong>Here, stage accuracy during training tells us nothing about rollout performance.</strong> The <a href="#analysis">analysis</a> explains why.</p>
+    </div>
+
+    <h3>Per-instance scores</h3>
+    <div class="tabs" role="tablist" id="inst-tabs">
+      <button role="tab" aria-selected="true" data-task="trash">picking_up_trash</button>
+      <button role="tab" aria-selected="false" data-task="veg">sorting_vegetables</button>
+    </div>
+    <div class="chart" id="inst-chart"></div>
+    <div class="legend" id="inst-legend"></div>
+    <p class="chart-note" id="inst-note"></p>
+
+    <h3>Rollouts</h3>
+    <div class="tabs" role="tablist" id="vid-tabs">
+      <button role="tab" aria-selected="true" data-set="success">Successes</button>
+      <button role="tab" aria-selected="false" data-set="long">Long horizon</button>
+      <button role="tab" aria-selected="false" data-set="fail">Failures</button>
+    </div>
+    <div class="vgrid" id="vgrid"></div>
+  </div>
+</section>
+
+<!-- ================================================================== -->
+<section id="analysis">
+  <div class="wrap">
+    <h2>Why long-horizon tasks still fail</h2>
+    <p class="lede">We use <code>q_score &times; 13</code> as exact ground truth and look at what the stage predictor actually outputs during <code>sorting_vegetables</code> rollouts.</p>
+
+    <p>The policy asks "which stage are you in?" every 20 simulator steps (0.67 s), which comes to 893 times per episode. Pick an episode below:</p>
+    <div class="tabs small" role="tablist" id="trace-tabs"></div>
+    <div class="chart" id="trace-chart"></div>
+    <div class="legend">
+      <span><i class="dot" style="background:var(--blue)"></i>stage head argmax (every query)</span>
+      <span><i style="background:var(--accent)"></i>voting-tracker stage</span>
+      <span><i style="background:var(--green)"></i>stage the episode actually reached (q &times; 13)</span>
+    </div>
+    <p class="chart-note" id="trace-note"></p>
+
+    <div class="stats">
+      <div class="stat"><div class="v">4.6</div><div class="l">true stage changes per episode (at most)</div></div>
+      <div class="stat"><div class="v accent">175</div><div class="l">times the predicted stage changes per episode</div></div>
+      <div class="stat"><div class="v accent">+3.9</div><div class="l">mean overshoot of the tracker's final stage</div></div>
+      <div class="stat"><div class="v accent">57%</div><div class="l">of predictions above any stage the episode ever reached</div></div>
+    </div>
+
+    <p>The voting tracker promotes on 2 of 3 votes and can skip two stages at once. It demotes only on 3 of 3 votes, and only by one stage. A rapidly fluctuating input therefore <strong>ratchets upward</strong>. When the tracker reports stage 12 while the true stage is 4, the action expert is told that twelve items are already sorted. It then executes behaviour unrelated to the scene in front of it.</p>
+
+    <h3>No readout of the current head beats a constant</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Readout of the stage head</th><th class="num">MAE vs. ground truth</th></tr></thead>
+        <tbody>
+          <tr><td>Raw prediction</td><td class="num">6.00</td></tr>
+          <tr><td>Median-smoothed over 15&ndash;400 predictions</td><td class="num">4.50 &ndash; 5.20</td></tr>
+          <tr><td>Best of 16 voting-tracker settings</td><td class="num">3.40</td></tr>
+          <tr class="hl"><td>Ignore the camera; always output 4</td><td class="num">2.00</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Confidence does not separate the good predictions from the bad ones either: provably wrong predictions carry about the same logit margin as the rest (4.50 vs. 5.25).</p>
+
+    <h3>Root cause: "nothing has happened" is never in the training data</h3>
+    <p>Across all 200 demonstrations per task, the BDDL stage sequence is essentially monotone, and <strong>every demonstration runs to completion</strong>. In the training distribution the stage always advances, so any feature that correlates with elapsed time scores well. That explains the 0.986 training accuracy.</p>
+    <p>A rollout that stalls for minutes in an unfamiliar scene is out of distribution. The model has no "no progress" answer to give. It picks confidently among fourteen options, and the tracker accumulates the noise.</p>
+  </div>
+</section>
+
+<!-- ================================================================== -->
+<section id="next">
+  <div class="wrap">
+    <h2>Next: a Two-Frame Event Head <span class="tag wip">in progress</span></h2>
+    <p class="lede">We change the question so that "no, nothing happened" becomes the overwhelmingly common answer, and give the model the evidence it needs to answer it.</p>
+
+    <h3>1. Two points in time</h3>
+    <p>BDDL labels are sampled every 30 steps and held, so a label changes 0&ndash;1 s <em>after</em> the event that caused it. By then the labelled frame shows a finished state, not a transition, and a transition cannot be seen in a single frame. We therefore add the three camera views from <strong>40 frames earlier</strong> (1.33 s, exactly two inference intervals) alongside the current three.</p>
+    <ul>
+      <li><strong>No extra inference cost.</strong> The policy is already queried every 20 steps, so the frame at <em>t</em>&minus;40 is the observation from two calls ago. We cache it, and the simulator interface is unchanged.</li>
+      <li><strong>Pretrained layout preserved.</strong> History views are appended after the current views, so the original three cameras keep their token positions.</li>
+      <li><strong>Fits in memory.</strong> 74.9 GiB &rarr; 80.6 GiB per GPU during training.</li>
+    </ul>
+
+    <h3>2. A binary question</h3>
+    <div class="callout neutral"><p style="font-size:18px"><strong>"Did a BDDL goal literal change during the last 1.33 s?"</strong></p></div>
+    <p>Across the same 200 demonstrations, <strong>96% of the answers are "no"</strong>. The model is now trained, on the vast majority of its examples, to say that nothing has happened. That is precisely the response the 14-way head cannot give. The question also cannot be answered from one frame, so the second time point becomes necessary rather than merely available.</p>
+
+    <h3>3. Stage by counting</h3>
+    <p>Labels are monotone and each transition is +1, so the stage is recovered by counting detected events:</p>
+<pre><code>stage = number of detected events so far
+  - count only rising edges   (overlapping 40-frame windows fire twice per event)
+  - refractory period after each event (10&ndash;15 queries)</code></pre>
+    <p>A real stage lasts 861 frames on average (43 queries), so the refractory period misses nothing real. Unlike the voting tracker, this has a hard ceiling on how fast the count can climb.</p>
+
+    <figure>
+      <div class="frame">
+        <div class="pipe">
+          <div class="node wip"><b>Frames t&minus;40 and t</b>3 cameras each, cached from two queries ago</div>
+          <div class="arrow">&rarr;</div>
+          <div class="node"><b>Pi0.5 VLM</b>6 image views in the prefix</div>
+          <div class="arrow">&rarr;</div>
+          <div class="node wip"><b>Event head</b>P(literal changed in last 1.33 s)</div>
+          <div class="arrow">&rarr;</div>
+          <div class="node wip"><b>Counter</b>rising edge + refractory</div>
+          <div class="arrow">&rarr;</div>
+          <div class="node"><b>Action expert</b>conditioned on counted stage</div>
+        </div>
+      </div>
+      <figcaption><strong>Figure 3.</strong> Planned event-based stage tracking. The dashed components are new. The old 14-way stage head is kept as a logged auxiliary output.</figcaption>
+    </figure>
+
+    <h3>4. Keep the old head, compare both</h3>
+    <p>The 14-way head is retained and trained (30,735 parameters, 0.0009% of the model) but no longer drives conditioning. Logging both heads during a rollout and comparing them against <code>q_score &times; N</code> answers directly which formulation is better. The bar is concrete: <strong>the event head must beat the constant baseline (MAE &lt; 2.00)</strong>, which the current head does not.</p>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Step</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td>BDDL stage labels, retraining, terminal-stage clamp</td><td><span class="tag done">done</span></td></tr>
+          <tr><td>Offline stage evaluation via q-score ground truth</td><td><span class="tag done">done</span></td></tr>
+          <tr><td>History frames, event target, event head, counting tracker</td><td><span class="tag wip">in progress</span></td></tr>
+          <tr><td>Per-episode RNG reset in evaluation</td><td><span class="tag wip">in progress</span></td></tr>
+          <tr><td>Event-head results on <code>picking_up_trash</code> and <code>sorting_vegetables</code></td><td><span class="tag wip">pending</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================== -->
+<section id="caveats">
+  <div class="wrap">
+    <h2>Caveats</h2>
+    <p class="lede">What these numbers can and cannot support, stated plainly.</p>
+
+    <h3>Evaluation is substantially non-deterministic</h3>
+    <p>We ran the <em>same checkpoint</em> on the <em>same instances</em> twice:</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Instance</th><th class="num">Run 1</th><th class="num">Run 2</th><th class="num">Difference</th></tr></thead>
+        <tbody>
+          <tr><td>301</td><td class="num">q = 0.692 (stage 9/13)</td><td class="num">q = 0.385 (stage 5/13)</td><td class="num">&minus;0.308</td></tr>
+          <tr><td>302</td><td class="num">q = 0.231 (stage 3/13)</td><td class="num">q = 0.000 (stage 0/13)</td><td class="num">&minus;0.231</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Single-instance spread is larger than most model differences we have tried to measure. A likely contributor is that the policy's random number generator is not reset between episodes. The outcome of an episode then depends on how many episodes ran before it. Until that is fixed, <strong>no single-run A/B at n = 10 should be read as conclusive</strong>.</p>
+
+    <h3>No clean baseline comparison yet</h3>
+    <p>For the unmodified 2025 checkpoint on these tasks we have only partial runs. On the instances where both exist, the models are indistinguishable. On <code>picking_up_trash</code> (instances 301&ndash;302) the BDDL model and the 2025 checkpoint both average 0.833 (1.000 with the clamp, on n = 2). On <code>sorting_vegetables</code> (6 instances so far) both average 0.333. The per-instance chart above shows these side by side. The case for the BDDL stage rests on correctness, since the old target is not computable at inference. It does not rest on a measured improvement over the baseline.</p>
+
+    <h3>Single tasks, not the benchmark</h3>
+    <p>All results so far are on two of the 100 tasks. They do not predict the full-benchmark score.</p>
+  </div>
+</section>
+
+<!-- ================================================================== -->
+<section id="summary">
+  <div class="wrap">
+    <h2>Summary</h2>
+    <ul>
+      <li><strong>Ground the stage signal in the task definition.</strong> Counting satisfied BDDL literals replaces a target that cannot be computed at test time with one that is always defined, and it aligns what the model tracks with what the benchmark scores.</li>
+      <li><strong>q-score is free ground truth for stage prediction.</strong> Every past rollout becomes a labelled evaluation for the stage tracker, so we can iterate without new simulation.</li>
+      <li><strong>Training accuracy hides the real failure.</strong> Demonstrations always make progress, so the model never learns "no progress". A binary, two-frame event objective puts that answer in 96% of training examples. We are testing it now.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================================================================== -->
+<section id="team">
+  <div class="wrap">
+    <h2>Team</h2>
+    <!-- TODO(placeholder): team members, photos (static/img/*.jpg), links -->
+    <div class="team">
+      <div class="member"><div class="avatar">?</div><div class="name"><span class="placeholder">Author One</span></div><div class="role">Affiliation</div></div>
+      <div class="member"><div class="avatar">?</div><div class="name"><span class="placeholder">Author Two</span></div><div class="role">Affiliation</div></div>
+      <div class="member"><div class="avatar">?</div><div class="name"><span class="placeholder">Author Three</span></div><div class="role">Affiliation</div></div>
+    </div>
+
+    <h3>Acknowledgments</h3>
+    <p>We build directly on the 2025 winning solution by Ilia Larchenko and colleagues at the <a href="https://robot-learning-collective.github.io/winning-behavior-1k-challenge" target="_blank" rel="noopener">Robot Learning Collective</a>, and on the BEHAVIOR-1K benchmark and OmniGibson simulator from the Stanford Vision and Learning Lab. <span class="placeholder">[Compute / funding acknowledgments]</span></p>
+
+    <h3>Citation</h3>
+    <div class="bib">
+      <button type="button" id="copy-bib">Copy</button>
+<pre><code id="bibtex">@misc{placeholder2026groundedstage,
+  title  = {[Project Title]: Grounding Task Stages in Symbolic Goals},
+  author = {Author One and Author Two and Author Three},
+  year   = {2026},
+  note   = {BEHAVIOR-1K Challenge 2026}
+}</code></pre>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">Page layout inspired by the <a href="https://robot-learning-collective.github.io/winning-behavior-1k-challenge" target="_blank" rel="noopener">Robot Learning Collective</a> project page. Last updated 2026-09-29.</div>
+</footer>
+
+<script src="static/js/main.js"></script>
+</body>
+</html>
