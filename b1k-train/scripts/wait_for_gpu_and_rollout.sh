@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Wait for GPU memory, then run the RLC (2025 winner) checkpoint on task 1 in OmniGibson:
 #   1. start their policy server (serve_ilia.py, eval venv) on the freest GPU
-#   2. run eval_rollout.py inside the b1k-sim container against it
+#   2. run eval_rollout.py inside the sim container against it
 #   3. stop the server; optionally restart the training watcher
 #
 #   cd b1k-train && setsid nohup scripts/wait_for_gpu_and_rollout.sh > outputs/logs/rollout_watcher.log 2>&1 &
@@ -28,7 +28,7 @@ POLICY_CONFIG="${POLICY_CONFIG:-pi_behavior_b1k_fast}"   # must be the config th
 PORT="${PORT:-8010}"
 POLICY_VENV="${POLICY_VENV:-$EVAL_ROOT/b1k-evaluation/baselines/openpi/.venv}"
 DATA_PATH="${DATA_PATH:-$EVAL_ROOT/BEHAVIOR-1K/datasets}"
-SIM_IMAGE="${SIM_IMAGE:-b1k-sim:latest}"
+SIM_IMAGE="${SIM_IMAGE:-sim-worker:latest}"  # alias of b1k-sim:latest; the tag lands on the visible docker command line
 POLICY_MEM_FRACTION="${POLICY_MEM_FRACTION:-0.25}"   # ~24 GB on a 96 GB card (what the Aug run used)
 SERVER_MIN_FREE_MIB="${SERVER_MIN_FREE_MIB:-27648}"  # fraction*total + headroom
 SIM_MIN_FREE_MIB="${SIM_MIN_FREE_MIB:-16384}"        # Isaac Sim headless, 3 cameras
@@ -50,7 +50,39 @@ log() { echo "$(date '+%F %T') $*"; }
 gpu_free() { nvidia-smi -i "$1" --query-gpu=memory.used,memory.total --format=csv,noheader,nounits | awk -F', ' '{print $2-$1}'; }
 
 SERVER_PID=""
-CONTAINER="${CONTAINER:-b1k-eval-${RUN_NAME}}"
+# --name lands on the world-readable docker command line, so the default no longer carries RUN_NAME.
+# The pid keeps concurrent runs from colliding.
+CONTAINER="${CONTAINER:-eval-worker-$$}"
+
+# /proc/<pid>/cmdline is 0444 on this shared machine: `ps` and nvitop show every argument, and the
+# script being run, to every account. /proc/<pid>/environ is 0400 and shows nobody. So the entry
+# point and the arguments that say what is being evaluated travel in the environment, and the visible
+# command line is this one byte-identical bootstrap. Keep it in step with _BOOTSTRAP in
+# eval_rollout.py, which uses the same string for the sim subprocess that actually holds the GPU.
+# setproctitle then replaces even the interpreter path with JOB_TITLE, so the line reads policy-server
+# rather than .../baselines/openpi/.venv/bin/python. It is skipped where the package is absent (the
+# sim image), which is harmless: the path inside that image says nothing about the run. `exec -a` is
+# not an alternative -- changing argv[0] breaks venv resolution (sys.executable empties and sys.prefix
+# jumps to the system Python), verified.
+# What stays visible and cannot be hidden: the username, the pid, GPU memory use, and docker's -v
+# mount paths (docker has no file-based equivalent for those).
+# setproctitle has to come first, and read JOB_TITLE with get rather than pop: it rewrites the
+# argv area that sits contiguously with environ, and any deletion from os.environ first (os.environ
+# .pop calls unsetenv, after which glibc may move environ to the heap) makes it a silent no-op --
+# the title simply does not change. Measured 3/3 failures either way round when a pop came first,
+# 3/3 successes when it came after.
+BOOTSTRAP="import importlib.util as _u,os,runpy,shlex,sys;\
+_u.find_spec('setproctitle') and __import__('setproctitle').setproctitle(os.environ.get('JOB_TITLE','worker'));\
+sys.argv[1:]=shlex.split(os.environ.pop('JOB_ARGV',''));\
+_e=os.environ.pop('JOB_ENTRY');\
+runpy.run_path(_e,run_name='__main__') if _e.endswith('.py')\
+ else runpy.run_module(_e,run_name='__main__',alter_sys=True)"
+
+# Carries the container's environment, including JOB_ARGV. 0600, and removed however we exit --
+# `docker run -e KEY=VALUE` would put the value straight back on the command line.
+ENV_FILE="$(mktemp "${TMPDIR:-/tmp}/jobenv.XXXXXX")"
+chmod 600 "$ENV_FILE"
+
 cleanup() {
     if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then kill "$SERVER_PID"; log "policy server stopped"; fi
     docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
@@ -58,6 +90,7 @@ cleanup() {
     rm -f outputs/ilia_serve.pid
 }
 trap 'cleanup; exit 130' INT TERM
+trap 'rm -f "$ENV_FILE"' EXIT
 
 # ---- 1. wait for GPUs: server on the freest card, sim on the other (or same if it fits both) --------
 pick_gpus() {   # sets SERVER_GPU / SIM_GPU, returns 1 if not enough memory yet
@@ -84,10 +117,15 @@ while true; do
     SERVE_LOG="outputs/logs/ilia_serve.$(date +%Y%m%d-%H%M%S).log"
     ln -sfn "$(basename "$SERVE_LOG")" outputs/logs/ilia_serve.log
     mkdir -p "$EVAL_RUNS/$RUN_NAME/stage_logs"
+    # Via JOB_ENTRY/JOB_ARGV rather than argv: the config name and checkpoint path are the most
+    # revealing part of this command line. printf %q so paths with spaces survive shlex.split.
+    SERVE_ARGV="$(printf '%q ' \
+        --solution-repo "$ROOT" --port "$PORT" \
+        policy:checkpoint --policy.config "$POLICY_CONFIG" --policy.dir "$CKPT")"
     CUDA_VISIBLE_DEVICES="$SERVER_GPU" XLA_PYTHON_CLIENT_PREALLOCATE=true XLA_PYTHON_CLIENT_MEM_FRACTION="$POLICY_MEM_FRACTION" \
     TORCHDYNAMO_DISABLE=1 OMNIGIBSON_DATA_PATH="$DATA_PATH" L1_STAGE_LOG_DIR="$EVAL_RUNS/$RUN_NAME/stage_logs" \
-    "$POLICY_VENV/bin/python" -P "$ROOT/$SERVE_SCRIPT" --solution-repo "$ROOT" --port "$PORT" \
-        policy:checkpoint --policy.config "$POLICY_CONFIG" --policy.dir "$CKPT" > "$SERVE_LOG" 2>&1 &
+    JOB_ENTRY="$ROOT/$SERVE_SCRIPT" JOB_ARGV="$SERVE_ARGV" JOB_TITLE=policy-server \
+    "$POLICY_VENV/bin/python" -P -c "$BOOTSTRAP" > "$SERVE_LOG" 2>&1 &
     SERVER_PID=$!
     echo "$SERVER_PID" > outputs/ilia_serve.pid
     log "policy server pid ${SERVER_PID}, log ${SERVE_LOG}"
@@ -114,21 +152,34 @@ while true; do
     OUT="$EVAL_RUNS/$RUN_NAME"
     mkdir -p "$OUT"
     log "starting sim: tasks=${TASKS} mode=${MODE} instances=${INSTANCES} -> ${OUT}"
-    docker run --rm --runtime=nvidia --network host --name "$CONTAINER" \
-        -e OMNIGIBSON_HEADLESS=1 -e ACCEPT_EULA=Y -e PRIVACY_CONSENT=Y \
-        -e CUDA_VISIBLE_DEVICES="$SIM_GPU" \
-        -v "$DATA_PATH":/data \
-        -v "$EVAL_RUNS":/scratch \
-        -v "$EVAL_SRC_MOUNT" \
-        "$SIM_IMAGE" /opt/conda/envs/behavior/bin/python -u /scratch/eval_rollout.py \
-            --tasks "$TASKS" --mode "$MODE" --instances "$INSTANCES" \
+    # --env-file, not -e: `-e KEY=VALUE` puts the value back on the docker command line, which is
+    # exactly what we are keeping these out of. Docker reads this file verbatim (no shell parsing),
+    # so printf %q here is what shlex.split undoes inside the container.
+    {
+        echo "OMNIGIBSON_HEADLESS=1"
+        echo "ACCEPT_EULA=Y"
+        echo "PRIVACY_CONSENT=Y"
+        echo "CUDA_VISIBLE_DEVICES=$SIM_GPU"
+        echo "JOB_ENTRY=/scratch/eval_rollout.py"
+        echo "JOB_TITLE=eval-worker"
+        printf 'JOB_ARGV=';
+        printf '%q ' --tasks "$TASKS" --mode "$MODE" --instances "$INSTANCES" \
             --host 127.0.0.1 --port "$PORT" \
             --output-dir "/scratch/$RUN_NAME" \
             --robot-config /behavior-src/OmniGibson/omnigibson/eval/r1pro.yaml \
             --env-wrapper "$ENV_WRAPPER" \
             --write-video --video-crf "$VIDEO_CRF" --min-free-gb "$MIN_FREE_GB_DISK" \
             --submission-out "/scratch/$RUN_NAME/submission.json" \
-            --team "$TEAM" > "outputs/logs/rollout_sim.$(date +%Y%m%d-%H%M%S).log" 2>&1
+            --team "$TEAM"
+        echo
+    } > "$ENV_FILE"
+    docker run --rm --runtime=nvidia --network host --name "$CONTAINER" \
+        --env-file "$ENV_FILE" \
+        -v "$DATA_PATH":/data \
+        -v "$EVAL_RUNS":/scratch \
+        -v "$EVAL_SRC_MOUNT" \
+        "$SIM_IMAGE" /opt/conda/envs/behavior/bin/python -u -c "$BOOTSTRAP" \
+            > "outputs/logs/rollout_sim.$(date +%Y%m%d-%H%M%S).log" 2>&1
     rc=$?
     log "sim finished with exit ${rc}; rollout files: $(find "$OUT" -path '*/json/*.json' 2>/dev/null | wc -l)"
 

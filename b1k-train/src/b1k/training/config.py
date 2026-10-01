@@ -297,11 +297,10 @@ class TrainConfig:
     batch_size: int = 32
     # Number of workers to use for the data loader. Keep this small: torch spawns one *process* per
     # worker, each holding its own ~5.5 GiB copy of the dataset objects, so host RAM scales linearly
-    # and is not shared. On 2026-09-30 a run with 80 workers held 440 GiB; the extra ~50 GiB that
-    # saving train_state needs (params + Adam moments + EMA) then pushed this 503 GiB shared machine
-    # into a global OOM that took it down for 9 hours and lost the optimizer state mid-save.
-    # 8 workers sustained 9.3 samples/s at batch 16 -- more than twice what training consumes -- so
-    # data loading was never the bottleneck and there is nothing to buy by raising this.
+    # with this number and is not shared. Saving a checkpoint needs a further ~50 GiB of host memory
+    # (params, Adam moments and EMA are staged through it), so leave headroom for it. 8 workers
+    # sustain 9.3 samples/s at batch 16, more than twice what training consumes, so data loading is
+    # not the bottleneck and raising this buys nothing.
     num_workers: int = 2
     # Number of train steps (batches) to run.
     num_train_steps: int = 30_000

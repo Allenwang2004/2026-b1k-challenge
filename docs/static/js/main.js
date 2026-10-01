@@ -9,7 +9,6 @@
     return n;
   };
   const fmt = (x) => (x == null ? "–" : x.toFixed(3));
-  const mean = (xs) => xs.reduce((a, b) => a + b, 0) / xs.length;
 
   function setupTabs(container, onSelect) {
     const buttons = [...container.querySelectorAll("button")];
@@ -66,81 +65,6 @@
     }
     render();
   })();
-
-  // ---------------------------------------------------------------- per-instance scores
-  // Public test instances 301-310. Values are k / (number of goal literals).
-  const INSTANCES = [301, 302, 303, 304, 305, 306, 307, 308, 309, 310];
-  const t3 = (ks) => ks.map((k) => (k == null ? null : k / 3));
-  const t13 = (ks) => ks.map((k) => (k == null ? null : k / 13));
-  const SCORES = {
-    trash: {
-      literals: 3,
-      series: [
-        { name: "Ours: BDDL", color: "--accent", mix: 55, values: t3([2, 3, 2, 0, 2, 3, 0, 3, 3, 2]) },
-        { name: "Ours: BDDL + clamp", color: "--accent", mix: 100, values: t3([3, 3, 2, 2, 2, 2, 0, 3, 2, 3]) },
-        { name: "2025 checkpoint (partial run)", color: "--blue", mix: 100, values: t3([3, 2, null, null, null, null, null, null, null, null]) },
-      ],
-    },
-    veg: {
-      literals: 13,
-      series: [
-        { name: "Ours: BDDL", color: "--accent", mix: 100, values: t13([4, 3, 4, 7, 10, 1, 1, 7, 4, 5]) },
-        { name: "2025 checkpoint (partial run)", color: "--blue", mix: 100, values: t13([5, 0, null, 4, 4, 7, 6, null, null, null]) },
-      ],
-    },
-  };
-
-  function seriesColor(s) {
-    return s.mix === 100 ? v(s.color) : `color-mix(in srgb, ${v(s.color)} ${s.mix}%, ${v("--bg")})`;
-  }
-
-  function drawInstances(key) {
-    const data = SCORES[key];
-    const host = document.getElementById("inst-chart");
-    host.innerHTML = "";
-    const W = 900, H = 260, m = { l: 44, r: 8, t: 12, b: 34 };
-    const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Per-instance q-score" }, host);
-    const iw = W - m.l - m.r, ih = H - m.t - m.b;
-    const y = (v) => m.t + ih * (1 - v);
-    [0, 0.25, 0.5, 0.75, 1].forEach((t) => {
-      el("line", { x1: m.l, x2: W - m.r, y1: y(t), y2: y(t), style: `stroke:${v("--border")}`, "stroke-width": 1 }, svg);
-      el("text", { x: m.l - 8, y: y(t) + 4, "text-anchor": "end", "font-size": 12, style: `fill:${v("--fg-faint")}` }, svg).textContent = t.toFixed(2);
-    });
-    const gw = iw / INSTANCES.length, ns = data.series.length;
-    const bw = Math.min(22, (gw - 14) / ns);
-    INSTANCES.forEach((inst, i) => {
-      const gx = m.l + gw * i + (gw - bw * ns - 2 * (ns - 1)) / 2;
-      data.series.forEach((s, j) => {
-        const q = s.values[i];
-        const x = gx + j * (bw + 2);
-        if (q == null) {
-          el("line", { x1: x + 2, x2: x + bw - 2, y1: y(0) - 3, y2: y(0) - 3, style: `stroke:${v("--fg-faint")}`, "stroke-width": 1, "stroke-dasharray": "2 2" }, svg);
-          return;
-        }
-        const h = Math.max(ih * q, 2);
-        const r = el("rect", { x, y: y(0) - h, width: bw, height: h, rx: 2, style: `fill:${seriesColor(s)}` }, svg);
-        el("title", {}, r).textContent = `${s.name} · instance ${inst}: q = ${fmt(q)} (${Math.round(q * data.literals)}/${data.literals} literals)`;
-      });
-      el("text", { x: m.l + gw * i + gw / 2, y: H - 12, "text-anchor": "middle", "font-size": 12, style: `fill:${v("--fg-muted")}` }, svg).textContent = inst;
-    });
-
-    document.getElementById("inst-legend").innerHTML = data.series
-      .map((s) => `<span><i style="background:${seriesColor(s)};height:10px"></i>${s.name}</span>`)
-      .join("") + `<span><i style="background:none;border-top:1px dashed var(--fg-faint);height:0"></i>not run yet</span>`;
-
-    // Means over all instances, plus a matched comparison where the baseline exists.
-    const base = data.series[data.series.length - 1];
-    const matched = INSTANCES.map((_, i) => i).filter((i) => base.values[i] != null);
-    const full = data.series
-      .filter((s) => s.values.every((v) => v != null))
-      .map((s) => `${s.name} ${fmt(mean(s.values))}`);
-    const onMatched = data.series.map((s) => `${s.name} ${fmt(mean(matched.map((i) => s.values[i])))}`);
-    document.getElementById("inst-note").textContent =
-      `Mean q over all 10: ${full.join(", ")}. On the ${matched.length} instances with a baseline run: ${onMatched.join(", ")}.`;
-  }
-
-  let instKey = "trash";
-  setupTabs(document.getElementById("inst-tabs"), (b) => drawInstances((instKey = b.dataset.task)));
 
   // ---------------------------------------------------------------- videos
   const VIDEOS = {
@@ -245,24 +169,160 @@
       document.getElementById("trace-note").textContent = "Could not load stage traces (serve this page over HTTP, not file://).";
     });
 
-  // ---------------------------------------------------------------- misc
-  drawInstances(instKey);
-
-  document.getElementById("copy-bib").addEventListener("click", (e) => {
-    const code = document.getElementById("bibtex");
-    const done = (label) => { e.target.textContent = label; setTimeout(() => (e.target.textContent = "Copy"), 1500); };
-    const selectText = () => {
-      const range = document.createRange();
-      range.selectNodeContents(code);
-      const sel = getSelection();
-      sel.removeAllRanges();
-      sel.addRange(range);
-      done("Selected");
+  // ---------------------------------------------------------------- BDDL dataset: charts + task explorer
+  const tipFor = (host) => {
+    const tip = document.createElement("div");
+    tip.className = "chart-tip";
+    tip.hidden = true;
+    host.appendChild(tip);
+    return {
+      show(html, evt) {
+        tip.innerHTML = html;
+        tip.hidden = false;
+        const r = host.getBoundingClientRect();
+        const x = Math.min(evt.clientX - r.left + 12, r.width - tip.offsetWidth - 4);
+        tip.style.left = `${Math.max(0, x)}px`;
+        tip.style.top = `${evt.clientY - r.top - tip.offsetHeight - 10}px`;
+      },
+      hide() { tip.hidden = true; },
     };
-    try {
-      navigator.clipboard.writeText(code.textContent).then(() => done("Copied"), selectText);
-    } catch {
-      selectText();
+  };
+  // Bar with a 4px rounded data end and a square baseline.
+  const colPath = (x, y, w, h) => {
+    const r = Math.min(4, w / 2, h);
+    return `M${x},${y + h}V${y + r}Q${x},${y} ${x + r},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + h}Z`;
+  };
+  const rowPath = (x, y, w, h) => {
+    const r = Math.min(4, h / 2, w);
+    return `M${x},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + h - r}Q${x + w},${y + h} ${x + w - r},${y + h}H${x}Z`;
+  };
+  const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+  function drawLiteralHist(tasks) {
+    const host = document.getElementById("lit-hist");
+    const maxL = Math.max(...tasks.map((t) => t.literals));
+    const bins = Array.from({ length: maxL }, (_, i) => tasks.filter((t) => t.literals === i + 1));
+    const maxN = Math.max(...bins.map((b) => b.length));
+    const W = 440, H = 220, m = { l: 30, r: 6, t: 10, b: 30 };
+    const iw = W - m.l - m.r, ih = H - m.t - m.b;
+    const slot = iw / maxL, bw = Math.min(24, slot - 2);
+    const yMax = Math.ceil(maxN / 5) * 5;
+    const y = (n) => m.t + ih * (1 - n / yMax);
+    const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Histogram of goal literals per task" }, host);
+    for (let n = 0; n <= yMax; n += 5) {
+      el("line", { x1: m.l, x2: W - m.r, y1: y(n), y2: y(n), style: `stroke:${v("--border")}`, "stroke-width": 1 }, svg);
+      el("text", { x: m.l - 6, y: y(n) + 4, "text-anchor": "end", "font-size": 11, style: `fill:${v("--fg-faint")}` }, svg).textContent = n;
     }
-  });
+    [1, 5, 10, 15, 20, 25].filter((k) => k <= maxL).forEach((k) => {
+      el("text", { x: m.l + slot * (k - 0.5), y: H - 12, "text-anchor": "middle", "font-size": 11, style: `fill:${v("--fg-faint")}` }, svg).textContent = k;
+    });
+    el("text", { x: m.l + iw / 2, y: H - 0.5, "text-anchor": "middle", "font-size": 11, style: `fill:${v("--fg-muted")}` }, svg).textContent = "goal literals";
+    const tip = tipFor(host);
+    bins.forEach((b, i) => {
+      const x0 = m.l + slot * i;
+      if (b.length) el("path", { d: colPath(x0 + (slot - bw) / 2, y(b.length), bw, y(0) - y(b.length)), style: `fill:${v("--accent")}` }, svg);
+      const hit = el("rect", { x: x0, y: m.t, width: slot, height: ih, fill: "transparent" }, svg);
+      const names = b.map((t) => t.name);
+      const html = `<b>${i + 1} literal${i ? "s" : ""}</b>: ${b.length} task${b.length === 1 ? "" : "s"}` +
+        (b.length ? `<br>${esc(names.slice(0, 4).join(", "))}${names.length > 4 ? `, +${names.length - 4} more` : ""}` : "");
+      hit.addEventListener("mousemove", (e) => tip.show(html, e));
+      hit.addEventListener("mouseleave", () => tip.hide());
+    });
+  }
+
+  function drawPredicates(tasks) {
+    const host = document.getElementById("pred-bars");
+    const lit = {}, used = {};
+    tasks.forEach((t) => Object.entries(t.predicates).forEach(([p, n]) => { lit[p] = (lit[p] || 0) + n; used[p] = (used[p] || 0) + 1; }));
+    const rows = Object.keys(lit).sort((a, b) => lit[b] - lit[a]);
+    const total = rows.reduce((a, p) => a + lit[p], 0);
+    const rowH = 22, bh = 14;
+    const W = 440, m = { l: 86, r: 40, t: 4, b: 4 };
+    const H = m.t + m.b + rowH * rows.length;
+    const iw = W - m.l - m.r, maxV = lit[rows[0]];
+    const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Goal literals by predicate" }, host);
+    el("line", { x1: m.l, x2: m.l, y1: m.t, y2: H - m.b, style: `stroke:${v("--border")}`, "stroke-width": 1 }, svg);
+    const tip = tipFor(host);
+    rows.forEach((p, i) => {
+      const yy = m.t + rowH * i, w = Math.max((iw * lit[p]) / maxV, 2);
+      el("text", { x: m.l - 8, y: yy + rowH / 2 + 4, "text-anchor": "end", "font-size": 11.5, style: `fill:${v("--fg-muted")};font-family:${v("--mono")}` }, svg).textContent = p;
+      el("path", { d: rowPath(m.l, yy + (rowH - bh) / 2, w, bh), style: `fill:${v("--accent")}` }, svg);
+      el("text", { x: m.l + w + 6, y: yy + rowH / 2 + 4, "font-size": 11.5, style: `fill:${v("--fg")}` }, svg).textContent = lit[p];
+      const hit = el("rect", { x: 0, y: yy, width: W, height: rowH, fill: "transparent" }, svg);
+      const html = `<b>${esc(p)}</b>: ${lit[p]} literals (${((100 * lit[p]) / total).toFixed(0)}%)<br>used by ${used[p]} task${used[p] === 1 ? "" : "s"}`;
+      hit.addEventListener("mousemove", (e) => tip.show(html, e));
+      hit.addEventListener("mouseleave", () => tip.hide());
+    });
+  }
+
+  function setupExplorer(tasks) {
+    const body = document.getElementById("task-rows");
+    const search = document.getElementById("task-search");
+    const count = document.getElementById("task-count");
+    const buttons = [...document.querySelectorAll("#task-explorer thead button")];
+    const maxL = Math.max(...tasks.map((t) => t.literals));
+    let sortKey = "id", asc = true;
+    const open = new Set();
+
+    const detail = (t) => {
+      const chips = Object.entries(t.predicates).map(([p, n]) => `<span class="chip">${esc(p)} × ${n}</span>`).join("");
+      const note = t.options > 1 ? `<span class="chip">one of ${t.options} solution options</span>` : "";
+      return `<tr class="detail"><td colspan="6"><div class="chips">${chips}${note}</div>
+        <ul class="literals">${t.goal.map((g) => `<li>${esc(g)}</li>`).join("")}</ul></td></tr>`;
+    };
+    const render = () => {
+      const q = search.value.trim().toLowerCase();
+      const list = tasks
+        .filter((t) => !q || t.name.toLowerCase().includes(q) || Object.keys(t.predicates).some((p) => p.includes(q)))
+        .sort((a, b) => {
+          const d = typeof a[sortKey] === "string" ? a[sortKey].localeCompare(b[sortKey]) : a[sortKey] - b[sortKey];
+          return asc ? d : -d;
+        });
+      body.innerHTML = list.map((t) => {
+        const isOpen = open.has(t.id);
+        return `<tr class="row" tabindex="0" data-id="${t.id}" aria-expanded="${isOpen}">
+          <td class="idx">${t.id}</td>
+          <td class="name"><code>${esc(t.name)}</code></td>
+          <td class="num"><span class="bar-mini" style="width:${Math.round((48 * t.literals) / maxL)}px"></span>${t.literals}</td>
+          <td class="num">${t.options}</td>
+          <td class="num">${t.minutes.toFixed(1)} min</td>
+          <td class="num">${Math.round(t.monotone_pct)}%</td>
+        </tr>${isOpen ? detail(t) : ""}`;
+      }).join("");
+      count.textContent = `${list.length} of ${tasks.length} tasks`;
+      buttons.forEach((b) => {
+        if (b.dataset.sort === sortKey) b.setAttribute("aria-sort", asc ? "ascending" : "descending");
+        else b.removeAttribute("aria-sort");
+      });
+    };
+    const toggle = (tr) => {
+      const id = +tr.dataset.id;
+      open.has(id) ? open.delete(id) : open.add(id);
+      render();
+      body.querySelector(`tr.row[data-id="${id}"]`)?.focus();
+    };
+    body.addEventListener("click", (e) => { const tr = e.target.closest("tr.row"); if (tr) toggle(tr); });
+    body.addEventListener("keydown", (e) => {
+      const tr = e.target.closest("tr.row");
+      if (tr && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); toggle(tr); }
+    });
+    buttons.forEach((b) => b.addEventListener("click", () => {
+      if (sortKey === b.dataset.sort) asc = !asc;
+      else { sortKey = b.dataset.sort; asc = sortKey === "id" || sortKey === "name"; }
+      render();
+    }));
+    search.addEventListener("input", render);
+    render();
+  }
+
+  fetch("static/data/bddl_tasks.json")
+    .then((r) => r.json())
+    .then((d) => {
+      drawLiteralHist(d.tasks);
+      drawPredicates(d.tasks);
+      setupExplorer(d.tasks);
+    })
+    .catch(() => {
+      document.getElementById("task-count").textContent = "Could not load the task table (serve this page over HTTP, not file://).";
+    });
 })();

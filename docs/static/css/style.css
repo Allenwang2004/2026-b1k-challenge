@@ -121,6 +121,7 @@ header.hero { text-align: center; padding: 64px 0 28px; }
 
 /* sections */
 section { padding: 40px 0 8px; }
+section:last-of-type { padding-bottom: 64px; }
 section > .wrap > h2 { font-family: var(--serif); font-size: 32px; font-weight: 600; margin: 0 0 6px; }
 h3 { font-size: 21px; margin: 34px 0 8px; }
 h4 { font-size: 17px; margin: 22px 0 6px; }
@@ -211,7 +212,40 @@ svg text { font-family: var(--sans); }
 .legend i.dot { width: 7px; height: 7px; border-radius: 50%; }
 .chart-note { font-size: 14px; color: var(--fg-muted); margin: 6px 0 0; font-variant-numeric: tabular-nums; }
 
-/* bibtex / footer */
-.bib { position: relative; }
-.bib button { position: absolute; top: 8px; right: 8px; font: inherit; font-size: 12px; padding: 3px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--fg-muted); cursor: pointer; }
-footer { border-top: 1px solid var(--border); margin-top: 48px; padding: 24px 0 48px; font-size: 13px; color: var(--fg-faint); }
+
+/* dataset section */
+.chart-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin: 8px 0; }
+.chart-pair figure { margin: 0; min-width: 0; }
+@media (max-width: 720px) { .chart-pair { grid-template-columns: 1fr; } }
+.chart-title { font-size: 15px; font-weight: 600; }
+.chart-sub { font-size: 13px; color: var(--fg-muted); margin-bottom: 8px; }
+.chart { position: relative; }
+.chart-tip { position: absolute; z-index: 5; pointer-events: none; max-width: 260px; padding: 6px 10px; border-radius: 6px; background: var(--fg); color: var(--bg); font-size: 12.5px; line-height: 1.4; box-shadow: 0 2px 8px color-mix(in srgb, var(--fg) 20%, transparent); }
+.chart-tip b { font-weight: 600; }
+
+.explorer-tools { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 12px 0 8px; }
+.search { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--fg-muted); flex: 1 1 260px; max-width: 420px; }
+.search input { flex: 1; min-width: 0; font: inherit; font-size: 14px; padding: 7px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--fg); }
+.explorer { max-height: 540px; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius); }
+.explorer table { font-size: 14px; }
+.explorer thead th { position: sticky; top: 0; z-index: 1; background: var(--bg-soft); padding: 0; }
+.explorer thead button { width: 100%; font: inherit; font-size: 12px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--fg-muted); background: none; border: 0; padding: 9px 12px; text-align: inherit; cursor: pointer; white-space: nowrap; }
+.explorer thead button:hover { color: var(--fg); }
+.explorer thead button[aria-sort]::after { content: " ↓"; }
+.explorer thead button[aria-sort="ascending"]::after { content: " ↑"; }
+.explorer tbody tr.row { cursor: pointer; }
+.explorer tbody tr.row:hover td { background: var(--bg-soft); }
+.explorer tbody tr.row[aria-expanded="true"] td { background: var(--accent-soft); }
+.explorer td.name code { background: none; padding: 0; font-size: 13px; }
+.explorer td.idx { color: var(--fg-faint); }
+.explorer tr.detail td { background: var(--bg-soft); padding: 10px 12px 14px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.chip { font-size: 12px; padding: 1px 8px; border-radius: 999px; background: var(--bg-code); color: var(--fg-muted); }
+.literals { margin: 0; padding: 0; list-style: none; font-family: var(--mono); font-size: 12.5px; line-height: 1.6; columns: 2 280px; column-gap: 24px; }
+.literals li { margin: 0; break-inside: avoid; overflow-wrap: anywhere; }
+.bar-mini { display: inline-block; height: 6px; border-radius: 3px; background: var(--accent); vertical-align: middle; margin-right: 8px; }
+
+/* architecture figure: the SVG carries its own white paper, so the frame matches it in both themes */
+.arch { margin: 36px 0 0; }
+.arch-frame { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius); background: #ffffff; }
+.arch-frame img { display: block; width: 100%; height: auto; min-width: 720px; }
