@@ -72,7 +72,7 @@
     <h2>TL;DR</h2>
     <p>The 2025 winning solution conditions its action expert on a <em>task stage</em>: an integer saying which phase of the task the robot is in. That integer was defined as a fixed fraction of the episode's total length. At test time the episode length is unknown, so the policy was trained to predict a target it can never observe.</p>
     <p>We redefine the stage as <strong>the number of BDDL goal literals currently satisfied</strong>. This is a function of the world state, so it is defined at every instant, both in training and at deployment. It is also exactly what the benchmark scores. On <code>picking_up_trash</code> the retrained policy reaches a <strong>q-score of 0.733</strong>.</p>
-    <p>On long-horizon tasks the stage predictor still fails, and we can say why. The demonstrations never contain a moment where nothing is happening, so the model never learns to answer "no progress yet". Our next change, a two-frame event head, targets exactly that.</p>
+    <p>On long-horizon tasks a single-frame stage predictor fails, and we can say why. One image cannot show that something just happened, and the demonstrations never contain a moment where nothing is happening, so the model never learns to answer "no progress yet". We therefore add <strong>history images</strong>: the policy also sees its cameras from 1.33 s earlier, and an event head detects goal changes between the two views.</p>
     <p>To make this possible at scale, we built <strong>a BDDL progress dataset for all 100 challenge tasks</strong>: for every one of the 20,000 demonstrations, which goal literals hold at each moment.</p>
   </div>
 </section>
@@ -170,6 +170,15 @@
 
     <h3>Terminal-stage clamp</h3>
     <p>The evaluator ends an episode as soon as every literal holds. So while an episode is still running, a reading of the terminal stage can only be a false positive. Acting on it tells the policy it is done, and it stops. We never condition the action expert on the terminal stage: the tracked stage is clamped to <em>N</em>&minus;1 for tasks with three or more stages.</p>
+
+    <h3>History images and an event head</h3>
+    <p>A single frame shows a state, not a transition. BDDL labels also trail the event that caused them by up to a second, so by the time a label changes the action is already over. To let the model see change directly, we pair every observation with the past.</p>
+    <ul>
+      <li><strong>History images.</strong> Alongside the current head and wrist views, the policy receives the same three cameras from 40 frames earlier (1.33 s, exactly two policy queries). That frame is the observation from two queries ago, so we cache it: no extra inference and no change to the simulator interface. The history tokens are appended after the current views, so the pretrained cameras keep their token positions.</li>
+      <li><strong>Event head.</strong> A linear head on the same task token as the stage head answers one binary question: <em>did a BDDL goal literal change during the last 1.33 s?</em> About 96% of training windows contain no change, so the head learns, from most of its examples, what "nothing happened" looks like. The rare positives are up-weighted in the loss.</li>
+      <li><strong>Counting events.</strong> The stage is the number of detected events. We count only rising edges, because overlapping windows fire twice for one event, and ignore new detections for 12 queries (8 s) after each one. On <code>sorting_vegetables</code> a real stage lasts 43 queries on average, so this misses nothing real but puts a hard limit on how fast the stage can climb.</li>
+    </ul>
+    <p>The original stage head is kept as an auxiliary output, and both heads are logged on every query, so the two readouts can be compared directly against <code>q_score &times; N</code>. The architecture figure at the top of the page shows the full pipeline.</p>
   </div>
 </section>
 
@@ -190,8 +199,8 @@
 <!-- ================================================================== -->
 <section id="analysis">
   <div class="wrap">
-    <h2>Why long-horizon tasks still fail</h2>
-    <p class="lede">We use <code>q_score &times; 13</code> as exact ground truth and look at what the stage predictor actually outputs during <code>sorting_vegetables</code> rollouts.</p>
+    <h2>Why It Fails Without History Images</h2>
+    <p class="lede">We use <code>q_score &times; 13</code> as exact ground truth and look at what the single-frame stage predictor actually outputs during <code>sorting_vegetables</code> rollouts.</p>
 
     <p>The policy asks "which stage are you in?" every 20 simulator steps (0.67 s), which comes to 893 times per episode. Pick an episode below:</p>
     <div class="tabs small" role="tablist" id="trace-tabs"></div>
@@ -211,6 +220,7 @@
     </div>
 
     <p>The voting tracker promotes on 2 of 3 votes and can skip two stages at once. It demotes only on 3 of 3 votes, and only by one stage. A rapidly fluctuating input therefore <strong>ratchets upward</strong>. When the tracker reports stage 12 while the true stage is 4, the action expert is told that twelve items are already sorted. It then executes behaviour unrelated to the scene in front of it.</p>
+    <p>The root problem is what one frame can show. In the demonstrations the stage always advances, so the head learns cues that track elapsed time. A stalled robot looks like nothing it has seen, and it has no way to answer "no progress". History images and the event head target exactly this gap: the change, or its absence, is visible between the two views.</p>
 
   </div>
 </section>
