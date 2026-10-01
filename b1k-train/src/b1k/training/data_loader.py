@@ -28,6 +28,7 @@ import openpi.training.config as _config
 import openpi.transforms as _transforms
 
 from b1k.models.observation import Observation
+from b1k.training.behavior_dataset import CAMERA_KEY_MAP
 from b1k.transforms_normalize import NormalizeWithPerTimestamp
 
 
@@ -122,15 +123,30 @@ def create_behavior_dataset(data_config: _config.DataConfig, action_horizon: int
         tasks = list(data_config.behavior_tasks)
         logging.info(f"Restricting training to tasks {tasks} (DataConfig.behavior_tasks)")
 
+    delta_timestamps = {
+        key: [t / 30.0 for t in range(action_horizon)] for key in data_config.action_sequence_keys
+    }
+
+    # A second observation from history_frames earlier, for the event head. The loader stacks the
+    # offsets in the order given, so index 0 is the past frame and index 1 the present -- B1kInputs
+    # splits them that way round. Before frame history_frames the loader clamps to frame 0 (verified:
+    # the entries become pixel-identical and *_is_pad reports [True, False]), so at the start of an
+    # episode history equals the present and the event label, which clamps the same way, reads 0.
+    if data_config.history_frames > 0:
+        for key in CAMERA_KEY_MAP:
+            delta_timestamps[key] = [-data_config.history_frames / 30.0, 0.0]
+        logging.info(
+            f"History observations: {data_config.history_frames} frames back "
+            f"({data_config.history_frames / 30.0:.2f} s) for {len(CAMERA_KEY_MAP)} cameras"
+        )
+
     dataset = BehaviorLeRobotDataset(
         repo_id=data_config.repo_id,
         root=data_config.behavior_dataset_root,
         tasks=tasks,
         modalities=["rgb"],
         local_only=True,
-        delta_timestamps={
-            key: [t / 30.0 for t in range(action_horizon)] for key in data_config.action_sequence_keys
-        },
+        delta_timestamps=delta_timestamps,
         episodes=data_config.episodes_index,
     )
 
@@ -182,7 +198,12 @@ def transform_dataset(dataset: Dataset, data_config: _config.DataConfig, *, skip
             # Symbolic task progress from the BDDL sidecars, alongside the time-split subtask_state.
             # Must come before TaskIndexToTaskId, which packs it into tokenized_prompt.
             if data_config.bddl_stage_labels_path is not None:
-                model_transforms.append(b1k_transforms.AttachBDDLStage(data_config.bddl_stage_labels_path))
+                model_transforms.append(
+                    b1k_transforms.AttachBDDLStage(
+                        data_config.bddl_stage_labels_path,
+                        event_window=data_config.history_frames,
+                    )
+                )
         else:
             model_transforms.append(transform)
 

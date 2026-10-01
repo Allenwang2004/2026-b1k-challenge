@@ -153,7 +153,26 @@ def main(args: Args) -> None:
         # stage needs a three-slot tokenized_prompt and the BDDL per-task stage counts, and getting
         # this wrong is silent -- the wrapper would feed a stage the model never saw.
         use_bddl_stage=getattr(config.model, "use_bddl_stage", False),
+        # Same reasoning: a model trained with a second observation must be served one, or every
+        # image token past the first three is missing and the event head is reading noise. Taking it
+        # from the checkpoint's own config means there is no flag to forget at rollout time.
+        history_frames=getattr(config.model, "history_frames", 0),
+        # The event head only drives the stage when the checkpoint actually has a trained one. The
+        # voting tracker stays in place for every other checkpoint.
+        use_event_counter=getattr(config.model, "use_bddl_event", False),
     )
+
+    if wrapper_config.history_frames > 0:
+        logging.info(
+            "History observation ON: %d frames back (%.2f s), cameras stacked as [past, present]",
+            wrapper_config.history_frames, wrapper_config.history_frames / 30.0,
+        )
+    if wrapper_config.use_event_counter:
+        logging.info(
+            "Stage driven by the EVENT head (rising edge + %d-call refractory); the 15-way head is "
+            "still logged for offline comparison but no longer moves the stage",
+            wrapper_config.event_refractory,
+        )
 
     if wrapper_config.use_bddl_stage:
         logging.info("BDDL stage conditioning ON: tokenized_prompt = [task_id, 0, bddl_stage]")

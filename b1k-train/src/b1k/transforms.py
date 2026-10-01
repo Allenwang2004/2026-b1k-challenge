@@ -67,6 +67,13 @@ class TaskIndexToTaskId(DataTransformFn):
     # Append the BDDL symbolic progress as a third entry. Must match the model's use_bddl_stage.
     include_bddl_stage: bool = False
 
+    # Append the event label as a fourth entry. Must match the model's use_bddl_event.
+    #
+    # Unlike the first three, this one is a *target*, not something the model is conditioned on --
+    # it rides along here only because tokenized_prompt is the channel that already reaches the loss.
+    # It is therefore absent at inference, and the loss must tolerate a three-column prompt.
+    include_bddl_event: bool = False
+
     # Write 0 into the subtask_state slot instead of the time-split stage, so the BDDL token is the
     # model's only progress signal. The four fused task/stage tokens then degenerate into a constant
     # "task N, at the beginning" bias, which the model learns to ignore. Keeping the zero in the data
@@ -114,6 +121,16 @@ class TaskIndexToTaskId(DataTransformFn):
                     "bddl_stage must go in the third slot of tokenized_prompt, but subtask_state is missing"
                 )
             entries.append(int(data["bddl_stage"]))
+
+        if self.include_bddl_event:
+            if not self.include_bddl_stage:
+                raise ValueError("include_bddl_event requires include_bddl_stage (event goes in slot 4)")
+            if "bddl_event" not in data:
+                raise KeyError(
+                    "include_bddl_event is set but the sample has no bddl_event. Set "
+                    "PiBehaviorConfig.history_frames so AttachBDDLStage computes it."
+                )
+            entries.append(int(data["bddl_event"]))
 
         prompt_tokens = np.array(entries, dtype=np.int32)
         prompt_mask = np.ones(len(entries), dtype=bool)
@@ -233,11 +250,16 @@ class AttachBDDLStage(DataTransformFn):
 
     Creates:
     - ``data["bddl_stage"]``: stage index for this frame, ``np.int32`` scalar
+    - ``data["bddl_event"]``: with ``event_window > 0``, 1 when the stage differs from the one
+      ``event_window`` frames earlier, else 0 (``np.int32`` scalar). The window is clamped at the
+      start of the episode, which matches how the data loader clamps the history image to frame 0:
+      history equals the present, so nothing can have happened, and the label agrees.
     """
 
-    def __init__(self, labels_path: str | Path, fps: int = 30):
+    def __init__(self, labels_path: str | Path, fps: int = 30, event_window: int = 0):
         self.labels_path = Path(labels_path).expanduser()
         self.fps = fps
+        self.event_window = int(event_window)
         if not self.labels_path.exists():
             raise FileNotFoundError(
                 f"BDDL stage labels not found at {self.labels_path}. "
@@ -286,6 +308,9 @@ class AttachBDDLStage(DataTransformFn):
                 f"(labels cover {len(stages)} frames)"
             )
         data["bddl_stage"] = np.array(stages[frame_index], dtype=np.int32)
+        if self.event_window > 0:
+            past = stages[max(0, frame_index - self.event_window)]
+            data["bddl_event"] = np.array(int(stages[frame_index] != past), dtype=np.int32)
         return data
 
 

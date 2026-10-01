@@ -93,12 +93,13 @@ class PiBehaviorPolicy(Policy):
         start_time = time.monotonic()
         
         # ONLY DIFFERENCE: Unpack tuple return from PiBehavior.sample_actions
-        actions, subtask_logits = self._sample_actions(sample_rng, observation, **sample_kwargs)
-        
+        actions, subtask_logits, event_logit = self._sample_actions(sample_rng, observation, **sample_kwargs)
+
         outputs = {
             "state": inputs["state"],
             "actions": actions,  # Now an array, not a tuple!
             "subtask_logits": subtask_logits,
+            "event_logit": event_logit,
         }
         
         model_time = time.monotonic() - start_time

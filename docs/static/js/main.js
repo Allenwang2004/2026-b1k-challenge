@@ -1,6 +1,7 @@
 (() => {
   const NS = "http://www.w3.org/2000/svg";
-  const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  // Colors are CSS custom properties so the charts follow the page theme without a redraw.
+  const v = (name) => `var(${name})`;
   const el = (tag, attrs = {}, parent) => {
     const n = document.createElementNS(NS, tag);
     for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
@@ -19,6 +20,52 @@
       })
     );
   }
+
+  // ---------------------------------------------------------------- teaser: predicted stage over the clip
+  // Raw stage-head argmax from the logged rollout, as [simulator step, predicted stage] change points.
+  // The clip runs at 4x and holds its last frame; the episode ended at step 2572 when the third can went in,
+  // so stage 3 (task complete) is the simulator's verdict, not a prediction.
+  const TEASER = { speed: 4, fps: 30, endStep: 2572, doneStage: 3, changes: [[0, 0], [1760, 1], [2200, 2]] };
+  (function teaser() {
+    const video = document.getElementById("teaser-video");
+    if (!video) return;
+    const cells = [...document.querySelectorAll("#stage-cells li")];
+    const segs = document.getElementById("stage-segs");
+    const head = document.getElementById("stage-playhead");
+    TEASER.changes.forEach(([step, stage], i) => {
+      const next = i + 1 < TEASER.changes.length ? TEASER.changes[i + 1][0] : TEASER.endStep;
+      const seg = document.createElement("div");
+      seg.className = `seg s${stage}`;
+      seg.style.flex = String(next - step);
+      segs.appendChild(seg);
+    });
+
+    let shown = -1;
+    const render = () => {
+      const step = video.currentTime * TEASER.speed * TEASER.fps;
+      let stage = 0;
+      for (const [s, st] of TEASER.changes) if (step >= s) stage = st;
+      if (step >= TEASER.endStep - 1) stage = TEASER.doneStage;
+      if (stage !== shown) {
+        cells.forEach((c, i) => {
+          c.classList.toggle("active", i === stage);
+          c.classList.toggle("past", i < stage);
+        });
+        shown = stage;
+      }
+      head.style.left = `${Math.min(step / TEASER.endStep, 1) * 100}%`;
+    };
+    const tick = () => { render(); if (!video.paused) requestAnimationFrame(tick); };
+    video.addEventListener("play", tick);
+    video.addEventListener("timeupdate", render);
+    video.addEventListener("seeked", render);
+    if (matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      video.removeAttribute("autoplay");
+      video.pause();
+      video.controls = true;
+    }
+    render();
+  })();
 
   // ---------------------------------------------------------------- per-instance scores
   // Public test instances 301-310. Values are k / (number of goal literals).
@@ -44,8 +91,7 @@
   };
 
   function seriesColor(s) {
-    const c = css(s.color);
-    return s.mix === 100 ? c : `color-mix(in srgb, ${c} ${s.mix}%, ${css("--bg")})`;
+    return s.mix === 100 ? v(s.color) : `color-mix(in srgb, ${v(s.color)} ${s.mix}%, ${v("--bg")})`;
   }
 
   function drawInstances(key) {
@@ -56,26 +102,26 @@
     const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Per-instance q-score" }, host);
     const iw = W - m.l - m.r, ih = H - m.t - m.b;
     const y = (v) => m.t + ih * (1 - v);
-    [0, 0.25, 0.5, 0.75, 1].forEach((v) => {
-      el("line", { x1: m.l, x2: W - m.r, y1: y(v), y2: y(v), stroke: css("--border"), "stroke-width": 1 }, svg);
-      el("text", { x: m.l - 8, y: y(v) + 4, "text-anchor": "end", "font-size": 12, fill: css("--fg-faint") }, svg).textContent = v.toFixed(2);
+    [0, 0.25, 0.5, 0.75, 1].forEach((t) => {
+      el("line", { x1: m.l, x2: W - m.r, y1: y(t), y2: y(t), style: `stroke:${v("--border")}`, "stroke-width": 1 }, svg);
+      el("text", { x: m.l - 8, y: y(t) + 4, "text-anchor": "end", "font-size": 12, style: `fill:${v("--fg-faint")}` }, svg).textContent = t.toFixed(2);
     });
     const gw = iw / INSTANCES.length, ns = data.series.length;
     const bw = Math.min(22, (gw - 14) / ns);
     INSTANCES.forEach((inst, i) => {
       const gx = m.l + gw * i + (gw - bw * ns - 2 * (ns - 1)) / 2;
       data.series.forEach((s, j) => {
-        const v = s.values[i];
+        const q = s.values[i];
         const x = gx + j * (bw + 2);
-        if (v == null) {
-          el("line", { x1: x + 2, x2: x + bw - 2, y1: y(0) - 3, y2: y(0) - 3, stroke: css("--fg-faint"), "stroke-width": 1, "stroke-dasharray": "2 2" }, svg);
+        if (q == null) {
+          el("line", { x1: x + 2, x2: x + bw - 2, y1: y(0) - 3, y2: y(0) - 3, style: `stroke:${v("--fg-faint")}`, "stroke-width": 1, "stroke-dasharray": "2 2" }, svg);
           return;
         }
-        const h = Math.max(ih * v, 2);
-        const r = el("rect", { x, y: y(0) - h, width: bw, height: h, rx: 2, fill: seriesColor(s) }, svg);
-        el("title", {}, r).textContent = `${s.name} · instance ${inst}: q = ${fmt(v)} (${Math.round(v * data.literals)}/${data.literals} literals)`;
+        const h = Math.max(ih * q, 2);
+        const r = el("rect", { x, y: y(0) - h, width: bw, height: h, rx: 2, style: `fill:${seriesColor(s)}` }, svg);
+        el("title", {}, r).textContent = `${s.name} · instance ${inst}: q = ${fmt(q)} (${Math.round(q * data.literals)}/${data.literals} literals)`;
       });
-      el("text", { x: m.l + gw * i + gw / 2, y: H - 12, "text-anchor": "middle", "font-size": 12, fill: css("--fg-muted") }, svg).textContent = inst;
+      el("text", { x: m.l + gw * i + gw / 2, y: H - 12, "text-anchor": "middle", "font-size": 12, style: `fill:${v("--fg-muted")}` }, svg).textContent = inst;
     });
 
     document.getElementById("inst-legend").innerHTML = data.series
@@ -154,29 +200,28 @@
     const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": `Stage trace, instance ${ep.instance}` }, host);
 
     for (let s = 0; s <= N; s++) {
-      el("line", { x1: m.l, x2: W - m.r, y1: y(s), y2: y(s), stroke: css("--border"), "stroke-width": s % 2 ? 0.5 : 1 }, svg);
+      el("line", { x1: m.l, x2: W - m.r, y1: y(s), y2: y(s), style: `stroke:${v("--border")}`, "stroke-width": s % 2 ? 0.5 : 1 }, svg);
       if (s % 2 === 0 || s === N)
-        el("text", { x: m.l - 8, y: y(s) + 4, "text-anchor": "end", "font-size": 12, fill: css("--fg-faint") }, svg).textContent = s;
+        el("text", { x: m.l - 8, y: y(s) + 4, "text-anchor": "end", "font-size": 12, style: `fill:${v("--fg-faint")}` }, svg).textContent = s;
     }
     for (let t = 0; t <= T; t += 60) {
       const px = m.l + (iw * t) / T;
-      el("text", { x: px, y: H - 20, "text-anchor": "middle", "font-size": 12, fill: css("--fg-faint") }, svg).textContent = `${t / 60} min`;
+      el("text", { x: px, y: H - 20, "text-anchor": "middle", "font-size": 12, style: `fill:${v("--fg-faint")}` }, svg).textContent = `${t / 60} min`;
     }
-    el("text", { x: 12, y: m.t + ih / 2, transform: `rotate(-90 12 ${m.t + ih / 2})`, "text-anchor": "middle", "font-size": 12, fill: css("--fg-muted") }, svg).textContent = "stage";
+    el("text", { x: 12, y: m.t + ih / 2, transform: `rotate(-90 12 ${m.t + ih / 2})`, "text-anchor": "middle", "font-size": 12, style: `fill:${v("--fg-muted")}` }, svg).textContent = "stage";
 
     // Argmax: one dot per query, slightly transparent so dense runs read as bands.
-    const blue = css("--blue");
-    const g = el("g", { fill: blue, "fill-opacity": 0.35 }, svg);
+    const g = el("g", { style: `fill:${v("--blue")}`, "fill-opacity": 0.35 }, svg);
     ep.argmax.forEach((a, i) => el("circle", { cx: x(i), cy: y(a), r: 1.8 }, g));
 
     // Ground truth: the stage the episode ended in. Monotone labels make this the maximum reached.
-    el("line", { x1: m.l, x2: W - m.r, y1: y(ep.true_final), y2: y(ep.true_final), stroke: css("--green"), "stroke-width": 2.5, "stroke-dasharray": "7 4" }, svg);
+    el("line", { x1: m.l, x2: W - m.r, y1: y(ep.true_final), y2: y(ep.true_final), style: `stroke:${v("--green")}`, "stroke-width": 2.5, "stroke-dasharray": "7 4" }, svg);
 
     // Tracker as a step line.
     let d = `M${x(0)},${y(ep.tracker[0])}`;
     ep.tracker.forEach((s, i) => { if (i) d += `H${x(i)}V${y(s)}`; });
     d += `H${W - m.r}`;
-    el("path", { d, fill: "none", stroke: css("--accent"), "stroke-width": 2.5, "stroke-linejoin": "round" }, svg);
+    el("path", { d, fill: "none", style: `stroke:${v("--accent")}`, "stroke-width": 2.5, "stroke-linejoin": "round" }, svg);
 
     const changes = ep.argmax.reduce((c, a, i) => c + (i && a !== ep.argmax[i - 1] ? 1 : 0), 0);
     const above = ep.argmax.filter((a) => a > ep.true_final).length / ep.argmax.length;
@@ -201,14 +246,23 @@
     });
 
   // ---------------------------------------------------------------- misc
-  const redraw = () => { drawInstances(instKey); drawTrace(); };
-  redraw();
-  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", redraw);
+  drawInstances(instKey);
 
   document.getElementById("copy-bib").addEventListener("click", (e) => {
-    navigator.clipboard.writeText(document.getElementById("bibtex").textContent).then(() => {
-      e.target.textContent = "Copied";
-      setTimeout(() => (e.target.textContent = "Copy"), 1500);
-    });
+    const code = document.getElementById("bibtex");
+    const done = (label) => { e.target.textContent = label; setTimeout(() => (e.target.textContent = "Copy"), 1500); };
+    const selectText = () => {
+      const range = document.createRange();
+      range.selectNodeContents(code);
+      const sel = getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      done("Selected");
+    };
+    try {
+      navigator.clipboard.writeText(code.textContent).then(() => done("Copied"), selectText);
+    } catch {
+      selectText();
+    }
   });
 })();

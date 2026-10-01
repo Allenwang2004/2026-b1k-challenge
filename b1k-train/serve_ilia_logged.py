@@ -85,7 +85,18 @@ class StageLog:
 
 
 def _ids(w) -> dict:
-    return {"task_id": w.task_id, "step": int(w.step_count), "prediction": int(w.prediction_count)}
+    out = {"task_id": w.task_id, "step": int(w.step_count), "prediction": int(w.prediction_count)}
+    # The event head's logit, when the served model has one. Recorded on every vote whether or not it
+    # is driving the stage, so one rollout yields both readouts and they can be scored against each
+    # other offline -- q_score x num_stages gives the episode's exact final stage, which makes that a
+    # far sharper comparison than rollout scores (identical checkpoints have differed by 0.31 q on the
+    # same instance, while the model effects being chased are an order of magnitude smaller).
+    logit = getattr(w, "last_event_logit", None)
+    if logit is not None:
+        out["event_logit"] = round(float(logit), 4)
+        out["event_count"] = int(getattr(w, "event_count", 0))
+        out["event_refractory_left"] = int(getattr(w, "event_refractory_left", 0))
+    return out
 
 
 def install_stage_logging(wrapper_cls, log: StageLog) -> None:

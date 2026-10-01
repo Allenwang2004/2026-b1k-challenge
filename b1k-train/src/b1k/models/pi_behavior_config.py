@@ -137,15 +137,67 @@ class PiBehaviorConfig(_model.BaseModelConfig):
     # so existing checkpoints and configs are unaffected.
     use_bddl_stage: bool = False
 
+    # How many frames back the second observation comes from, or 0 for no history.
+    #
+    # 40 frames is 1.33 s -- exactly two inference intervals, since the evaluator calls the policy
+    # every 20 simulator steps. So at rollout the observation from two calls ago *is* the frame at
+    # t-40 and no new simulator access is needed, only a cache.
+    #
+    # The history views are appended after the current ones, so the three existing cameras keep
+    # their token positions and a checkpoint trained without history still lines up.
+    history_frames: int = 0
+
+    # Predict "did a BDDL literal change during the last history_frames?" from the same token the
+    # stage head reads. Requires history_frames > 0: the question is unanswerable from one frame.
+    #
+    # This exists because the 15-way stage target has no "nothing happened" class -- every training
+    # demonstration runs to completion and the labels are monotone, so any time-correlated feature
+    # scores well, and the head has never been asked to report a lack of progress. Measured on
+    # sorting_vegetables: the true stage changes 4.6 times per episode and the head's answer changes
+    # 178 times. The binary target is ~96% negative, so "no" is finally supervised.
+    use_bddl_event: bool = False
+
+    # Weight of the event loss relative to the action loss.
+    event_loss_weight: float = 0.1
+
+    # Weight on positive examples in the event loss, as (1 - rate) / rate for the task's true event
+    # rate. Measured from the label files: picking_up_trash 2.28% -> 42.8, sorting_vegetables 4.31%
+    # -> 22.2. Build it with scripts/build_bddl_stage_labels.py output and set it per task.
+    #
+    # This must NOT be estimated from the batch. Positives are so rare that at batch 8 no positive
+    # appears in 83% of picking_up_trash batches, and a batch holding exactly one yields an estimate
+    # of 7.0 where the truth is 42.8 -- underweighting positives sixfold on precisely the batches that
+    # contain them, which pushes the head toward always answering "no". That is the failure this head
+    # exists to avoid, so the weight is fixed rather than inferred.
+    event_pos_weight: float = 30.0
+
     @property
     def prompt_len(self) -> int:
-        """Columns of tokenized_prompt: [task_id, subtask_state] (+ bddl_stage)."""
+        """Columns of tokenized_prompt: [task_id, subtask_state] (+ bddl_stage) (+ bddl_event)."""
+        if self.use_bddl_event:
+            return 4
         return 3 if self.use_bddl_stage else 2
+
+    @property
+    def history_image_suffix(self) -> str:
+        """Suffix marking a history view of a camera: base_0_rgb -> base_0_rgb_h."""
+        return "_h"
 
     def __post_init__(self):
         if self.task_embedding_dim is None:
             paligemma_config = _gemma.get_config(self.paligemma_variant)
             object.__setattr__(self, "task_embedding_dim", paligemma_config.width)
+        if self.use_bddl_event:
+            if self.history_frames <= 0:
+                raise ValueError(
+                    "use_bddl_event needs history_frames > 0: 'did a literal change in the last "
+                    "N frames' cannot be answered from a single observation."
+                )
+            if not self.use_bddl_stage:
+                raise ValueError(
+                    "use_bddl_event needs use_bddl_stage -- the event target is derived from the "
+                    "same BDDL labels, and the event column sits after the stage column."
+                )
     
     def get_fast_dim_ranges(self) -> list[tuple[int, int]]:
         """Parse fast_encoded_dims into list of ranges."""

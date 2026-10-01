@@ -149,6 +149,11 @@ class PiBehavior(_model.BaseModel):
         # Stage predictor - predicts stage from VLM output of base task token
         # Outputs MAX_NUM_STAGES logits, but invalid stages are masked per task
         self.stage_pred_from_vlm = nnx.Linear(paligemma_config.width, MAX_NUM_STAGES, rngs=rngs)
+
+        # Event predictor -- one logit for "a BDDL literal changed during the last history window".
+        # Reads the same token as the stage head (see predict_event). Always constructed so that the
+        # parameter tree does not depend on the flag; it is simply untrained when use_bddl_event is off.
+        self.event_pred_from_vlm = nnx.Linear(paligemma_config.width, 1, rngs=rngs)
         
         # Task + subtask fusion layers
         # Combines task embedding + cos/sin encoded subtask state
@@ -554,6 +559,20 @@ class PiBehavior(_model.BaseModel):
         valid_mask = jnp.arange(MAX_NUM_STAGES)[None, :] < task_num_stages[:, None]  # [B, 15]
         return jnp.where(valid_mask, subtask_logits, -jnp.inf)
 
+    def predict_event(self, prefix_out, prefix_ar_mask) -> at.Float[at.Array, "b"]:
+        """One logit for "a BDDL literal changed during the last history window".
+
+        Read off the same base task token as predict_stage: ar_mask False and sitting at the end of
+        the first attention block, so it sees every image -- the current three views and the three
+        from ``history_frames`` earlier -- and nothing downstream of itself. Answering requires
+        comparing the two sets, which is the point: a single frame shows a finished state, never a
+        transition, because the BDDL sidecars are sampled every 30 steps and held, putting the label
+        0-1 s after the event that caused it.
+        """
+        first_stage_token_idx = jnp.argmax(prefix_ar_mask)
+        base_task_output = prefix_out[:, first_stage_token_idx - 1, :]
+        return self.event_pred_from_vlm(base_task_output)[:, 0]  # [B]
+
     @at.typecheck
     def embed_prefix(
         self, 
@@ -948,10 +967,53 @@ class PiBehavior(_model.BaseModel):
                 jnp.argmax(subtask_logits, axis=-1) == ground_truth_subtask
             )
             subtask_loss_value = self.config.subtask_loss_weight * jnp.mean(subtask_loss)
-        
+
+        # 12b. Event loss: "did a BDDL literal change during the last history window?"
+        #
+        # Positives are rare -- on sorting_vegetables 13 transitions x 40 frames out of ~12,400
+        # frames, about 4% -- so an unweighted BCE collapses to always answering "no". The weight is
+        # computed from the batch rather than hardcoded, because the positive rate differs per task
+        # (picking_up_trash is nearer 1.6%).
+        #
+        # That 96% of the signal is negative is the entire reason this loss exists. The 15-way stage
+        # target has no "nothing happened" class at all: every demonstration completes and the labels
+        # are monotone, so the head is never asked to report a lack of progress -- and at rollout,
+        # facing a stalled scene it has never seen, it answers among 14 unfamiliar options instead.
+        event_loss_value = 0.0
+        if train and self.config.use_bddl_event and observation.tokenized_prompt.shape[1] > 3:
+            event_logit = self.predict_event(prefix_out, prefix_ar_mask)  # [B]
+            event_target = observation.tokenized_prompt[:, 3].astype(jnp.float32)  # [B]
+
+            # Fixed weight from the task's measured event rate -- see event_pos_weight for why this
+            # must not be estimated from the batch.
+            weights = jnp.where(event_target > 0, self.config.event_pos_weight, 1.0)
+
+            # Numerically stable BCE-with-logits, written out to avoid an optax import here.
+            raw = (
+                jnp.maximum(event_logit, 0.0)
+                - event_logit * event_target
+                + jnp.log1p(jnp.exp(-jnp.abs(event_logit)))
+            )  # [B]
+            losses["event_loss"] = jnp.sum(weights * raw) / jnp.maximum(jnp.sum(weights), 1e-6)
+            # Logged so a drift between the data's true event rate and event_pos_weight is visible.
+            losses["event_loss_pos_rate"] = jnp.mean(event_target)
+
+            predicted = (event_logit > 0).astype(jnp.float32)
+            losses["event_accuracy"] = jnp.mean(predicted == event_target)
+            # Accuracy is ~96% for a head that always says "no", so report the two halves too.
+            losses["event_accuracy_recall"] = (
+                jnp.sum(predicted * event_target) / jnp.maximum(jnp.sum(event_target), 1e-6)
+            )
+            losses["event_accuracy_precision"] = (
+                jnp.sum(predicted * event_target) / jnp.maximum(jnp.sum(predicted), 1e-6)
+            )
+            event_loss_value = self.config.event_loss_weight * losses["event_loss"]
+
         # 13. Total loss
-        losses["total_loss"] = losses["action_loss"] + subtask_loss_value + fast_loss_value
-        
+        losses["total_loss"] = (
+            losses["action_loss"] + subtask_loss_value + fast_loss_value + event_loss_value
+        )
+
         return losses
 
     @override
@@ -1061,7 +1123,12 @@ class PiBehavior(_model.BaseModel):
         # Predict stage from VLM output of base task token
         # Find base task token position (same logic as in compute_detailed_loss)
         subtask_logits = self.predict_stage(prefix_out, prefix_ar_mask, observation)
-        
+
+        # And the event logit, off the same token. Always computed so the return arity does not
+        # depend on the config; it is meaningless (untrained) when use_bddl_event is off, and the
+        # eval wrapper only consults it when its own config says to.
+        event_logit = self.predict_event(prefix_out, prefix_ar_mask)
+
         # Transform KV cache for cross-layer attention
         if self.kv_transform is not None:
             kv_cache = self.kv_transform(kv_cache)
@@ -1156,4 +1223,4 @@ class PiBehavior(_model.BaseModel):
 
         x_0, _, _ = jax.lax.while_loop(cond, step, (noise, 1.0, step_rng))
         
-        return x_0, subtask_logits
+        return x_0, subtask_logits, event_logit

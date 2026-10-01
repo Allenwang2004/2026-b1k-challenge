@@ -96,6 +96,11 @@ class DataConfig:
     # heuristic time-split stage (ComputeSubtaskStateFromMeta -> "subtask_state") is untouched.
     bddl_stage_labels_path: str | None = None
 
+    # How many frames back the second observation comes from, or 0 for none. Mirrors
+    # PiBehaviorConfig.history_frames; the model config is the source of truth and
+    # PiBehaviorDataConfig.create copies it here so the loader and AttachBDDLStage agree.
+    history_frames: int = 0
+
     # Action space for DROID dataset.
     action_space: droid_rlds_dataset.DroidActionSpace | None = None
     # Path to the data filter file for DROID dataset
@@ -124,6 +129,7 @@ class ModelTransformFactory(GroupFactory):
                 b1k_transforms.TaskIndexToTaskId(
                     include_bddl_stage=getattr(model_config, "use_bddl_stage", False),
                     zero_subtask_state=getattr(model_config, "use_bddl_stage", False),
+                    include_bddl_event=getattr(model_config, "use_bddl_event", False),
                 ),
                 _transforms.PadStatesAndActions(model_config.action_dim),
             ],
@@ -247,6 +253,9 @@ class LeRobotB1KDataConfig(DataConfigFactory):
             data_transforms=data_transforms,
             model_transforms=model_transforms,
             action_sequence_keys=self.action_sequence_keys,
+            # The model config owns the history length; mirror it so the loader requests the extra
+            # frames and AttachBDDLStage computes its event label over the same window.
+            history_frames=getattr(model_config, "history_frames", 0),
         )
 
 
@@ -286,7 +295,13 @@ class TrainConfig:
     seed: int | None = None
     # Global batch size.
     batch_size: int = 32
-    # Number of workers to use for the data loader.
+    # Number of workers to use for the data loader. Keep this small: torch spawns one *process* per
+    # worker, each holding its own ~5.5 GiB copy of the dataset objects, so host RAM scales linearly
+    # and is not shared. On 2026-09-30 a run with 80 workers held 440 GiB; the extra ~50 GiB that
+    # saving train_state needs (params + Adam moments + EMA) then pushed this 503 GiB shared machine
+    # into a global OOM that took it down for 9 hours and lost the optimizer state mid-save.
+    # 8 workers sustained 9.3 samples/s at batch 16 -- more than twice what training consumes -- so
+    # data loading was never the bottleneck and there is nothing to buy by raising this.
     num_workers: int = 2
     # Number of train steps (batches) to run.
     num_train_steps: int = 30_000
@@ -394,7 +409,7 @@ _CONFIGS = [
         num_train_steps=200_000,
         assets_base_dir="./outputs/assets",
         checkpoint_base_dir="./outputs/checkpoints",
-        num_workers=80,
+        num_workers=8,
         save_interval=500,
         keep_period=2000,
     ),
@@ -446,7 +461,7 @@ _CONFIGS = [
         num_train_steps=20_000,
         assets_base_dir="./outputs/assets",
         checkpoint_base_dir="./outputs/checkpoints",
-        num_workers=80,
+        num_workers=8,
         save_interval=2000,
         keep_period=10_000,
     ),
@@ -508,7 +523,7 @@ _CONFIGS = [
         num_train_steps=20_000,
         assets_base_dir="./outputs/assets",
         checkpoint_base_dir="./outputs/checkpoints",
-        num_workers=80,
+        num_workers=8,
         save_interval=2000,
         keep_period=10_000,
     ),
@@ -566,7 +581,7 @@ _CONFIGS = [
         num_train_steps=2_500,
         assets_base_dir="./outputs/assets",
         checkpoint_base_dir="./outputs/checkpoints",
-        num_workers=80,
+        num_workers=8,
         save_interval=2500,
         keep_period=100_000,
     ),
@@ -628,7 +643,7 @@ _CONFIGS = [
         num_train_steps=20_000,
         assets_base_dir="./outputs/assets",
         checkpoint_base_dir="./outputs/checkpoints",
-        num_workers=80,
+        num_workers=8,
         save_interval=1_000_000,
         keep_period=100_000,
     ),
@@ -692,10 +707,84 @@ _CONFIGS = [
         num_train_steps=20_000,
         assets_base_dir="./outputs/assets",
         checkpoint_base_dir="./outputs/checkpoints",
-        num_workers=80,
+        num_workers=8,
         save_interval=1_000_000,
         keep_period=100_000,
     ),
+    # ---------------------------------------------------------------------------------------------
+    # Event-detection variants: a second observation from 40 frames back, plus a binary
+    # "did a BDDL literal change in that window?" head.
+    #
+    # Identical to the two configs above apart from history_frames / use_bddl_event / event_loss_weight
+    # and the task they train on, so the comparison against them is like-for-like. Measured peak
+    # memory with the extra 768 image tokens: 80.55 GiB against 74.89 GiB without, so it fits on one
+    # card; step time is expected to rise roughly 50% and has not been measured.
+    # ---------------------------------------------------------------------------------------------
+    *[
+        TrainConfig(
+            name=f"pi_behavior_b1k_event_ckpt2_lr2e5_{suffix}",
+            exp_name="openpi",
+            project_name="B1K",
+            model=pi_behavior_config.PiBehaviorConfig(
+                action_horizon=30,
+                action_dim=32,
+                use_correlated_noise=True,
+                correlation_beta=0.5,
+                use_fast_auxiliary=True,
+                fast_loss_weight=0.05,
+                fast_encoded_dims="0:6,7:23",
+                fast_vocab_size=1024,
+                max_fast_tokens=200,
+                use_kv_transform=True,
+                use_knowledge_insulation=False,
+                subtask_loss_weight=0.1,
+                freeze_vision_backbone=True,
+                use_bddl_stage=True,
+                history_frames=40,
+                use_bddl_event=True,
+                event_loss_weight=0.1,
+                event_pos_weight=pos_weight,
+            ),
+            data=LeRobotB1KDataConfig(
+                repo_id="behavior-1k/2026-challenge-demos",
+                base_config=DataConfig(
+                    prompt_from_task=False,
+                    behavior_dataset_root="/home/b1k-challenge/evaluation/train_set/2026-challenge-demos",
+                    behavior_tasks=(task,),
+                    use_per_timestamp_norm=True,
+                    bddl_stage_labels_path=(
+                        "/home/b1k-challenge/evaluation/b1k-train/outputs/assets/"
+                        f"bddl_stage_labels/{labels}"
+                    ),
+                ),
+                use_delta_joint_actions=True,
+                use_fast_tokenization=True,
+            ),
+            lr_schedule=_optimizer.CosineDecaySchedule(
+                warmup_steps=200,
+                peak_lr=2e-5,
+                decay_steps=20_000,
+                decay_lr=2e-6,
+            ),
+            num_flow_samples=15,
+            weight_loader=weight_loaders.PiBehaviorWeightLoader(
+                "/home/b1k-challenge/evaluation/behavior_checkpoints/ilia/checkpoint_2/params"
+            ),
+            num_train_steps=20_000,
+            assets_base_dir="./outputs/assets",
+            checkpoint_base_dir="./outputs/checkpoints",
+            num_workers=8,
+            save_interval=1_000_000,
+            keep_period=100_000,
+        )
+        # pos_weight is (1 - rate) / rate for the task's measured event rate over a 40-frame window,
+        # counted directly from the label files: picking_up_trash 24,040 / 1,053,550 frames = 2.28%,
+        # sorting_vegetables 102,490 / 2,380,740 = 4.31%.
+        for suffix, task, labels, pos_weight in (
+            ("task1", "picking_up_trash", "2026-challenge-demos.npz", 42.8),
+            ("task20", "sorting_vegetables", "2026-challenge-demos_task20.npz", 22.2),
+        )
+    ],
 ]
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):

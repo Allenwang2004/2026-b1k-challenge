@@ -92,10 +92,37 @@ def init_wandb(config: _config.TrainConfig, *, resuming: bool, log_code: bool = 
         wandb.run.log_code(epath.Path(__file__).parent.parent)
 
 
+# Heads that may be absent from the checkpoint being loaded and are then left at their random
+# initialization. Unlike the intermediate fields below (which are not parameters at all), these are
+# real trainable weights -- they are listed because they were added to the model after the released
+# checkpoints were trained, so demanding they be present would make every prior checkpoint unloadable.
+#
+# Keep this list short and explicit. Anything not named here must match exactly, so a genuine
+# structural mismatch still fails loudly instead of silently training from noise.
+FRESHLY_INITIALIZED_PARAM_NAMES = [
+    'event_pred_from_vlm',  # binary "a BDDL literal changed in the last history window" head
+]
+
+
 def _load_weights_and_validate(loader: _weight_loaders.WeightLoader, params_shape: at.Params) -> at.Params:
     """Loads and validates the weights. Returns a loaded subset of the weights."""
     loaded_params = loader.load(params_shape)
-    
+
+    def drop_freshly_initialized(params_dict):
+        flat = traverse_util.flatten_dict(params_dict)
+        kept = {
+            k: v for k, v in flat.items()
+            if not any(name in str(k) for name in FRESHLY_INITIALIZED_PARAM_NAMES)
+        }
+        dropped = len(flat) - len(kept)
+        if dropped:
+            logging.info(f"{dropped} parameter(s) will keep their random initialization: "
+                         f"{FRESHLY_INITIALIZED_PARAM_NAMES}")
+        return traverse_util.unflatten_dict(kept)
+
+    params_shape = drop_freshly_initialized(params_shape)
+    loaded_params = drop_freshly_initialized(loaded_params)
+
     # Filter out nnx.Intermediate fields from both sides (they're not params, excluded from checkpoints)
     # This allows loading old checkpoints that didn't have these fields
     def filter_intermediate_fields(params_dict):

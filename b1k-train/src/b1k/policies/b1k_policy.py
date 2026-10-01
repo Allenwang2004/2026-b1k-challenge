@@ -66,6 +66,23 @@ def _parse_image(image) -> np.ndarray:
     return image
 
 
+def _split_history(image) -> tuple[np.ndarray, np.ndarray | None]:
+    """Split a camera entry into ``(current, history)``.
+
+    With ``delta_timestamps`` set for the video keys the loader stacks the requested offsets on a
+    leading axis, ordered as the offsets were given: ``[-history/30, 0.0]`` puts the past frame at
+    index 0 and the present at index 1. Without history the entry is a plain image and the second
+    return value is None.
+
+    The leading axis is distinguished from a channels-first image by length: a stack has 2 entries,
+    a CHW image has 3.
+    """
+    image = np.asarray(image)
+    if image.ndim == 4 and image.shape[0] == 2:
+        return _parse_image(image[1]), _parse_image(image[0])
+    return _parse_image(image), None
+
+
 @dataclasses.dataclass(frozen=True)
 class B1kInputs(transforms.DataTransformFn):
     # Determines which model will be used (not actually used in B1K, kept for compatibility)
@@ -81,19 +98,32 @@ class B1kInputs(transforms.DataTransformFn):
 
         # Possibly need to parse images to uint8 (H,W,C) since LeRobot automatically
         # stores as float32 (C,H,W), gets skipped for policy inference
-        base_image = _parse_image(data["observation/egocentric_camera"])
-        wrist_image_left = _parse_image(data["observation/wrist_image_left"])
-        wrist_image_right = _parse_image(data["observation/wrist_image_right"])
+        base_image, base_history = _split_history(data["observation/egocentric_camera"])
+        wrist_image_left, wrist_left_history = _split_history(data["observation/wrist_image_left"])
+        wrist_image_right, wrist_right_history = _split_history(data["observation/wrist_image_right"])
 
         # For B1K, always use 3 cameras (base, left_wrist, right_wrist)
         names = ("base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb")
         images = (base_image, wrist_image_left, wrist_image_right)
         image_masks = (np.True_, np.True_, np.True_)
 
+        image_dict = dict(zip(names, images, strict=True))
+        image_mask_dict = dict(zip(names, image_masks, strict=True))
+
+        # History views, appended *after* the current ones so the three cameras the checkpoint was
+        # pretrained with keep their token positions. Insertion order is what embed_prefix iterates.
+        histories = (base_history, wrist_left_history, wrist_right_history)
+        if histories[0] is not None:
+            for name, past in zip(names, histories, strict=True):
+                if past is None:
+                    raise ValueError(f"{name} has no history view while the others do")
+                image_dict[f"{name}_h"] = past
+                image_mask_dict[f"{name}_h"] = np.True_
+
         inputs = {
             "state": state,
-            "image": dict(zip(names, images, strict=True)),
-            "image_mask": dict(zip(names, image_masks, strict=True)),
+            "image": image_dict,
+            "image_mask": image_mask_dict,
         }
 
         if "actions" in data:
@@ -146,5 +176,7 @@ class B1kOutputs(transforms.DataTransformFn):
             result["subtask_logits"] = data["subtask_logits"]
         if "predicted_stage" in data:
             result["predicted_stage"] = data["predicted_stage"]
-            
+        if "event_logit" in data:
+            result["event_logit"] = data["event_logit"]
+
         return result

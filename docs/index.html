@@ -3,38 +3,33 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <!-- TODO(placeholder): final project title -->
-  <title>Grounded Stage Tracking</title>
+  <title>Counting What’s Done</title>
   <meta name="description" content="Grounding a VLA policy's task-stage signal in BDDL goal literals for the BEHAVIOR-1K 2026 Challenge.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Source+Serif+4:opsz,wght@8..60,600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&family=Source+Serif+4:opsz,wght@8..60,600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="static/css/style.css">
 </head>
 <body>
 
 <nav class="topnav">
   <div class="wrap">
-    <a class="brand" href="#top">Grounded Stage Tracking</a>
+    <a class="brand" href="#top">Counting What’s Done</a>
     <a href="#challenge">Challenge</a>
     <a href="#method">Method</a>
     <a href="#results">Results</a>
     <a href="#analysis">Analysis</a>
     <a href="#next">Next: Event Head</a>
     <a href="#caveats">Caveats</a>
-    <a href="#team">Team</a>
+    <a href="#acknowledgments">Acknowledgments</a>
   </div>
 </nav>
 
 <header class="hero" id="top">
   <div class="wrap">
     <div class="venue">BEHAVIOR-1K Challenge 2026</div>
-    <!-- TODO(placeholder): final title -->
-    <h1><span class="placeholder">[Project Title]</span><br>Grounding Task Stages in Symbolic Goals</h1>
+    <h1>Counting What’s Done<span class="h1-sub">Grounding Task Progress in Symbolic Goals for Long-Horizon VLA Policies</span></h1>
     <p class="subtitle">A vision-language-action policy that tracks progress by counting satisfied BDDL goal literals instead of guessing how far into the episode it is.</p>
-    <!-- TODO(placeholder): authors and affiliations -->
-    <p class="authors"><span class="placeholder">Author One</span><sup>1</sup>, <span class="placeholder">Author Two</span><sup>1</sup>, <span class="placeholder">Author Three</span><sup>2</sup></p>
-    <p class="affil"><sup>1</sup><span class="placeholder">Affiliation</span> &nbsp; <sup>2</sup><span class="placeholder">Affiliation</span></p>
     <div class="buttons">
       <!-- TODO(placeholder): set href once the repo is public -->
       <a class="btn" href="#" aria-disabled="true">
@@ -46,20 +41,23 @@
         Report (soon)
       </a>
       <a class="btn ghost" href="https://behavior.stanford.edu/challenge/" target="_blank" rel="noopener">Challenge</a>
-      <a class="btn ghost" href="https://robot-learning-collective.github.io/winning-behavior-1k-challenge" target="_blank" rel="noopener">2025 solution we build on</a>
     </div>
 
-    <div class="teaser">
-      <video src="static/videos/trash_309.mp4" poster="static/videos/trash_309.jpg" autoplay muted loop playsinline></video>
-      <p class="caption center">Our policy completing <code>picking_up_trash</code> (public instance 309) at 8&times; speed. Left: wrist cameras. Right: head camera.</p>
-    </div>
+    <figure class="teaser">
+      <video id="teaser-video" src="static/videos/teaser_stage.mp4" poster="static/videos/teaser_stage.jpg" autoplay muted loop playsinline></video>
+      <div class="stagebar">
+        <div class="stagebar-head"><span>Stage predicted by the policy</span><span>4&times; speed</span></div>
+        <ol class="stage-cells" id="stage-cells">
+          <li><b>0</b><span>cans in the bin</span></li>
+          <li><b>1</b><span>can in the bin</span></li>
+          <li><b>2</b><span>cans in the bin</span></li>
+          <li class="done-cell"><b>3</b><span>task complete<small>from the simulator</small></span></li>
+        </ol>
+        <div class="stage-track"><div class="stage-segs" id="stage-segs"></div><div class="stage-playhead" id="stage-playhead"></div></div>
+      </div>
+      <figcaption class="caption">The highlighted stage is the policy's own prediction from its three cameras, made every 0.67 s. It moves up only when a can lands in the bin, and it holds steady while the robot searches. The episode ends the moment the last can goes in, before the policy can predict stage 3, so the final cell comes from the simulator.</figcaption>
+    </figure>
 
-    <div class="stats">
-      <div class="stat"><div class="v accent">0.733</div><div class="l">q-score on <code>picking_up_trash</code>, 10 public instances</div></div>
-      <div class="stat"><div class="v accent">4 / 10</div><div class="l">full successes on the same task</div></div>
-      <div class="stat"><div class="v">0</div><div class="l">quantities the stage signal needs that are unknown at test time (was 1)</div></div>
-      <div class="stat"><div class="v">free</div><div class="l">ground truth for stage prediction: every rollout's q-score gives it exactly</div></div>
-    </div>
   </div>
 </header>
 
@@ -174,6 +172,12 @@
   <div class="wrap">
     <h2>Results</h2>
     <p class="lede">All numbers are single runs over the 10 public test instances (301&ndash;310) of each task. See <a href="#caveats">Caveats</a> for run-to-run variance.</p>
+    <div class="stats">
+      <div class="stat"><div class="v accent">0.733</div><div class="l">q-score on <code>picking_up_trash</code>, 10 public instances</div></div>
+      <div class="stat"><div class="v accent">4 / 10</div><div class="l">full successes on the same task</div></div>
+      <div class="stat"><div class="v">0</div><div class="l">quantities the stage signal needs that are unknown at test time (was 1)</div></div>
+      <div class="stat"><div class="v">free</div><div class="l">ground truth for stage prediction: every rollout's q-score gives it exactly</div></div>
+    </div>
 
     <h3><code>picking_up_trash</code> &nbsp;<small style="color:var(--fg-muted);font-weight:500">3 goal literals &middot; 4 stages</small></h3>
     <div class="table-wrap">
@@ -370,25 +374,16 @@
 </section>
 
 <!-- ================================================================== -->
-<section id="team">
+<section id="acknowledgments">
   <div class="wrap">
-    <h2>Team</h2>
-    <!-- TODO(placeholder): team members, photos (static/img/*.jpg), links -->
-    <div class="team">
-      <div class="member"><div class="avatar">?</div><div class="name"><span class="placeholder">Author One</span></div><div class="role">Affiliation</div></div>
-      <div class="member"><div class="avatar">?</div><div class="name"><span class="placeholder">Author Two</span></div><div class="role">Affiliation</div></div>
-      <div class="member"><div class="avatar">?</div><div class="name"><span class="placeholder">Author Three</span></div><div class="role">Affiliation</div></div>
-    </div>
-
-    <h3>Acknowledgments</h3>
+    <h2>Acknowledgments</h2>
     <p>We build directly on the 2025 winning solution by Ilia Larchenko and colleagues at the <a href="https://robot-learning-collective.github.io/winning-behavior-1k-challenge" target="_blank" rel="noopener">Robot Learning Collective</a>, and on the BEHAVIOR-1K benchmark and OmniGibson simulator from the Stanford Vision and Learning Lab. <span class="placeholder">[Compute / funding acknowledgments]</span></p>
 
     <h3>Citation</h3>
     <div class="bib">
       <button type="button" id="copy-bib">Copy</button>
-<pre><code id="bibtex">@misc{placeholder2026groundedstage,
-  title  = {[Project Title]: Grounding Task Stages in Symbolic Goals},
-  author = {Author One and Author Two and Author Three},
+<pre><code id="bibtex">@misc{countingwhatsdone2026,
+  title  = {Counting What's Done: Grounding Task Progress in Symbolic Goals for Long-Horizon VLA Policies},
   year   = {2026},
   note   = {BEHAVIOR-1K Challenge 2026}
 }</code></pre>

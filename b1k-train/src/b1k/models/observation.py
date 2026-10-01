@@ -92,8 +92,16 @@ def preprocess_observation(
 
     batch_shape = observation.state.shape[:-1]
 
+    # Iterate over what the observation actually carries, not over image_keys, so that extra views
+    # (the "_h" history cameras) are processed rather than silently dropped. image_keys stays as the
+    # contract that must be present -- checked above.
+    #
+    # Note the augmentation rng is shared across keys, so a camera and its history view receive the
+    # SAME crop, rotation and colour jitter. That is required, not incidental: independent
+    # augmentation would put more difference between the two frames than the actual scene change,
+    # and the event head reads exactly that difference.
     out_images = {}
-    for key in image_keys:
+    for key in observation.images:
         image = observation.images[key]
         if image.shape[1:3] != image_resolution:
             image = image_tools.resize_with_pad(image, *image_resolution)

@@ -23,6 +23,17 @@ RESIZE_SIZE = 224
 # "shift:<k>" (model sees tracked stage + k, clamped). Unset = normal behaviour.
 STAGE_OVERRIDE = os.environ.get("B1K_STAGE_OVERRIDE", "").strip() or None
 
+# Which head drives the tracked stage, overriding what the checkpoint's config implies.
+# B1K_EVENT_COUNTER = "1" (event head -> rising-edge counter) or "0" (15-way head -> voting tracker).
+# Unset follows the model config.
+#
+# A checkpoint trained with use_bddl_event carries both heads, and both are logged on every vote, so
+# the same checkpoint can be evaluated either way without retraining. Note this only chooses which
+# readout *drives* the robot: the history observations are part of the trained prefix and are always
+# supplied, whichever readout is selected.
+_EVENT_COUNTER_ENV = os.environ.get("B1K_EVENT_COUNTER", "").strip()
+EVENT_COUNTER_OVERRIDE = None if _EVENT_COUNTER_ENV == "" else _EVENT_COUNTER_ENV not in ("0", "false", "False")
+
 
 @dataclasses.dataclass
 class B1KWrapperConfig:
@@ -49,6 +60,36 @@ class B1KWrapperConfig:
     # Only applied where there is a stage left to fall back to (>= 3 stages); with 2 stages the clamp
     # would pin the signal to 0, which the fixed0 ablation showed destroys the policy.
     cap_terminal_stage: bool = True
+
+    # Frames back for the second observation, or 0 for none. Must match the served checkpoint's
+    # PiBehaviorConfig.history_frames.
+    #
+    # No extra simulator access is needed: the policy is consulted every execute_in_n_steps steps, so
+    # the observation from history_frames // execute_in_n_steps calls ago *is* the frame we want. With
+    # the defaults that is exactly two calls back (40 = 2 x 20).
+    history_frames: int = 0
+
+    # Drive the stage from the event head instead of the voting tracker.
+    #
+    # The tracker promotes on votes_to_promote of history_len and may skip two stages at once, while
+    # demotion needs unanimity and moves one stage -- so a fluctuating input ratchets upward. Measured
+    # on sorting_vegetables: the 15-way head's answer changes 178 times per episode where the true
+    # stage changes 4.6 times, and the tracker ended +3.9 stages above the truth on average. No setting
+    # of history_len / votes_to_promote beat simply emitting the constant 4 (best MAE 3.40 vs 2.00),
+    # and prediction confidence does not separate right from wrong (median margin 4.50 vs 5.25), so
+    # the input cannot be filtered into shape either.
+    use_event_counter: bool = False
+
+    # Inference calls to ignore after counting an event.
+    #
+    # Two jobs. The 40-frame window overlaps consecutive calls 20 steps apart, so one real event makes
+    # about two calls in a row answer "yes" -- rising-edge detection alone would double count on the
+    # boundary. And it puts a ceiling on how fast the stage can climb, which the voting tracker lacks.
+    # Real stages last 861 frames on average, about 43 calls, so 12 misses nothing genuine.
+    event_refractory: int = 12
+
+    # Decision threshold on the event logit. 0.0 is p = 0.5; raise it to demand more confidence.
+    event_threshold: float = 0.0
 
 
 class B1KPolicyWrapper():
@@ -87,7 +128,50 @@ class B1KPolicyWrapper():
         self.step_count = 0
         self.prediction_count = 0
         self.next_initial_actions = None
-    
+
+        # History observations, one entry per inference call. Depth is how many calls back the wanted
+        # frame is; +1 so that after appending the present the oldest entry is exactly that far back.
+        self.history_depth = (
+            max(1, round(self.config.history_frames / self.config.execute_in_n_steps))
+            if self.config.history_frames > 0 else 0
+        )
+        self.obs_history = deque([], maxlen=self.history_depth + 1)
+
+        # Event counter state
+        self.last_event_logit = None   # read by update_current_stage, logged by serve_ilia_logged
+        self.event_prev_fired = False
+        self.event_refractory_left = 0
+        self.event_count = 0
+
+        if EVENT_COUNTER_OVERRIDE is not None and EVENT_COUNTER_OVERRIDE != self.config.use_event_counter:
+            logger.info(
+                f"🧪 B1K_EVENT_COUNTER={_EVENT_COUNTER_ENV!r}: stage driven by "
+                f"{'the event head' if EVENT_COUNTER_OVERRIDE else 'the 15-way head (voting tracker)'}, "
+                f"overriding the checkpoint's config ({self.config.use_event_counter})"
+            )
+            self.config = dataclasses.replace(self.config, use_event_counter=EVENT_COUNTER_OVERRIDE)
+
+        if self.config.use_event_counter and self.config.history_frames <= 0:
+            raise ValueError("use_event_counter needs history_frames > 0 (the event head needs two frames)")
+        if self.config.history_frames > 0:
+            logger.info(
+                f"History observations: {self.config.history_frames} frames back = "
+                f"{self.history_depth} inference call(s) at {self.config.execute_in_n_steps} steps each"
+            )
+        if self.config.use_event_counter:
+            logger.info(
+                f"Stage from event counter (refractory {self.config.event_refractory} calls, "
+                f"threshold {self.config.event_threshold}), voting tracker disabled"
+            )
+
+    def _reset_history_and_event_state(self):
+        self.obs_history.clear()
+        self.last_event_logit = None
+        self.event_prev_fired = False
+        self.event_refractory_left = 0
+        self.event_count = 0
+
+
     def num_stages(self, task_id: int) -> int:
         """Stages this task has, under whichever stage definition the served model was trained on."""
         counts = BDDL_TASK_NUM_STAGES if self.config.use_bddl_stage else TASK_NUM_STAGES
@@ -103,6 +187,7 @@ class B1KPolicyWrapper():
         self.next_initial_actions = None
         self.current_stage = 0
         self.prediction_history.clear()
+        self._reset_history_and_event_state()
         logger.info(f"Policy reset - Task ID: {self.task_id}, Action horizon: {self.action_horizon}")
     
     def _handle_task_change(self, new_task_id):
@@ -126,6 +211,7 @@ class B1KPolicyWrapper():
             self.last_actions = None
             self.action_index = 0
             self.next_initial_actions = None
+            self._reset_history_and_event_state()
 
     def process_obs(self, obs: dict) -> dict:
         """Process observation to match model input format."""
@@ -140,19 +226,53 @@ class B1KPolicyWrapper():
         left_resized = resize_with_pad(left_original, RESIZE_SIZE, RESIZE_SIZE)
         right_resized = resize_with_pad(right_original, RESIZE_SIZE, RESIZE_SIZE)
         
-        return {
+        cameras = {
             "observation/egocentric_camera": head_resized,
             "observation/wrist_image_left": left_resized,
             "observation/wrist_image_right": right_resized,
+        }
+
+        if self.config.history_frames > 0:
+            cameras = self._attach_history(cameras)
+
+        return {
+            **cameras,
             "observation/state": prop_state,
             "prompt": self.text_prompt,
         }
-    
+
+    def _attach_history(self, cameras: dict) -> dict:
+        """Stack each camera as ``[past, present]``, the shape the training loader produces.
+
+        Going through the same two-frame stack that ``delta_timestamps`` yields means B1kInputs splits
+        it with the same code in both places, so there is no second definition of which frame is which.
+
+        Until the buffer has filled, the oldest entry available is used -- at the first call that is the
+        present frame itself. That mirrors training, where the loader clamps the offset to frame 0 at
+        the start of an episode: history equals the present, so the event label reads 0 and the head is
+        asked the same question it was trained on rather than something it has never seen.
+        """
+        self.obs_history.append({k: v.copy() for k, v in cameras.items()})
+        past = self.obs_history[0]
+        return {k: np.stack([past[k], v], axis=0) for k, v in cameras.items()}
+
+
     def update_current_stage(self, predicted_subtask_logits):
-        """Update current stage using majority voting."""
+        """Advance the tracked stage.
+
+        Two implementations behind config.use_event_counter. Both are entered here rather than from
+        act() so that the stage log's patch -- which wraps this method -- records every stage movement
+        whichever one is active, and so the 15-way logits keep being logged either way. That is what
+        makes the two readouts comparable offline against ``q_score x num_stages``, which is the exact
+        final stage of any rollout.
+        """
         if self.task_id is None:
             return
-            
+
+        if self.config.use_event_counter:
+            self.prediction_history.append(int(np.argmax(predicted_subtask_logits)))
+            return self._update_stage_from_event()
+
         max_stage = self.num_stages(self.task_id) - 1
         predicted_stage = int(np.argmax(predicted_subtask_logits))
         
@@ -184,7 +304,49 @@ class B1KPolicyWrapper():
                     self.current_stage -= 1
                     self.prediction_history.clear()
                     logger.info(f"⬅️  Stage went back: {old_stage} → {self.current_stage} (task {self.task_id}, step {self.step_count})")
-    
+
+    def _update_stage_from_event(self):
+        """Stage as a count of detected events: rising edge, then a refractory pause.
+
+        Counting is valid because the BDDL labels are all but monotone -- across 200 demonstrations per
+        task only 1-2 episodes contain a single decrement -- and every transition is +1. So the stage is
+        simply how many events have happened, and no second head is needed to say where to jump to.
+
+        The two guards do different work. The rising edge stops one event being counted twice while its
+        window still overlaps the next call. The refractory bounds the climb rate at something
+        physically possible, which is the property the voting tracker never had.
+        """
+        if self.last_event_logit is None:
+            return
+
+        fired = float(self.last_event_logit) > self.config.event_threshold
+
+        if self.event_refractory_left > 0:
+            self.event_refractory_left -= 1
+            # Still tracked, so an event that keeps firing through the pause is not counted again the
+            # moment the pause ends.
+            self.event_prev_fired = fired
+            return
+
+        rising = fired and not self.event_prev_fired
+        self.event_prev_fired = fired
+        if not rising:
+            return
+
+        max_stage = self.num_stages(self.task_id) - 1
+        if self.current_stage >= max_stage:
+            return
+
+        old_stage = self.current_stage
+        self.current_stage += 1
+        self.event_count += 1
+        self.event_refractory_left = self.config.event_refractory
+        self.prediction_history.clear()
+        logger.info(
+            f"🔔 Event #{self.event_count}: stage {old_stage} → {self.current_stage} "
+            f"(logit {float(self.last_event_logit):+.3f}, task {self.task_id}, step {self.step_count})"
+        )
+
     def _stage_for_model(self) -> int:
         """The stage the model is conditioned on.
 
@@ -343,6 +505,12 @@ class B1KPolicyWrapper():
                 compression_status = f"compressed {actions_to_execute}→{execute_steps}" if should_compress else f"uncompressed ({execute_steps})"
                 logger.info(f"🎯 Prediction #{self.prediction_count} | Actions: {compression_status} | Inpainting: {self.next_initial_actions is not None}")
             
+            # Stash the event logit before the stage update: _update_stage_from_event reads it from
+            # here rather than taking it as an argument, so update_current_stage keeps the one-argument
+            # signature that serve_ilia_logged.py's logging patch wraps.
+            if "event_logit" in output:
+                self.last_event_logit = float(np.asarray(output["event_logit"]).reshape(-1)[0])
+
             # Update stage based on model predictions
             if "subtask_logits" in output:
                 self.update_current_stage(output["subtask_logits"])
