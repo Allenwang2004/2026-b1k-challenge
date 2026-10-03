@@ -199,6 +199,27 @@
 <!-- ================================================================== -->
 <section id="analysis">
   <div class="wrap">
+    <h2>It Really Does Catch the Moment of Placement</h2>
+    <p class="lede">Two detections from a single <code>sorting_vegetables</code> rollout, shown as the policy saw them. Each column is one query, 1.33 s apart; the top row is the earlier view the model is given, the bottom row the current one. The query where the event head crossed its threshold is boxed.</p>
+
+    <p>Because the columns are spaced by the same 1.33 s that separates the two views, each column's top image is the previous column's bottom image: the strip reads as one continuous sequence, and the pair inside any column is exactly what the model compares.</p>
+
+    <figure class="arch">
+      <div class="arch-frame">
+        <img src="static/img/event_catch_1.jpg" width="2270" height="698" loading="lazy" alt="Seven consecutive queries from the head camera. In the first three the red bowl on the counter holds one ear of corn while the arm works at the basket. In the boxed query the earlier view still shows the arm over the bowl and the current view shows it withdrawn with two ears of corn in the bowl. The remaining queries show the bowl with two ears and the arm back at the basket.">
+      </div>
+      <figcaption class="caption">A second ear of corn enters the bowl. The count in the bowl goes from one to two between the two images of the boxed query, and the event logit jumps from &minus;6.7 to &plus;6.5 and falls back to &minus;4.5 one query later. Nothing else in the strip crosses the threshold.</figcaption>
+    </figure>
+
+    <figure class="arch">
+      <div class="arch-frame">
+        <img src="static/img/event_catch_2.jpg" width="2270" height="698" loading="lazy" alt="Seven consecutive queries from the head camera. The red bowl is empty for the first three. In the fourth, boxed, the earlier view shows the arm at the bowl and the current view shows corn resting in it. The fifth query is also boxed. The last two show the bowl holding the corn while the arm returns to the basket.">
+      </div>
+      <figcaption class="caption">The first ear of corn enters an empty bowl. Here the head fires twice for one placement &mdash; at the query where the corn appears and again 1.33 s later, while the two views still straddle the change. That double count is why the counter takes only rising edges and then pauses before it will count again.</figcaption>
+    </figure>
+
+    <p>These are the detections working as designed: the stage advances because something measurable happened in the scene, not because time passed. The same strips also show the two ways the signal is still imperfect &mdash; one real placement can trigger more than one detection, and a large change that satisfies no goal literal, such as the robot lifting a bowl or turning until one enters view, looks much the same to a head trained on pairs of images.</p>
+
     <h2>Why It Fails Without History Images</h2>
     <p class="lede">We use <code>q_score &times; 13</code> as exact ground truth and look at what the single-frame stage predictor actually outputs during <code>sorting_vegetables</code> rollouts.</p>
 

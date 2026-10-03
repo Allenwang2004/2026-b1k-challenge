@@ -94,13 +94,38 @@ trap 'rm -f "$ENV_FILE"' EXIT
 
 # ---- 1. wait for GPUs: server on the freest card, sim on the other (or same if it fits both) --------
 pick_gpus() {   # sets SERVER_GPU / SIM_GPU, returns 1 if not enough memory yet
-    local f0 f1
-    f0=$(gpu_free 0); f1=$(gpu_free 1)
-    STATUS="gpu0:${f0}MiB gpu1:${f1}MiB"
-    if (( f0 >= f1 )); then SERVER_GPU=0; SIM_GPU=1; SF=$f0; MF=$f1; else SERVER_GPU=1; SIM_GPU=0; SF=$f1; MF=$f0; fi
+    # Ranks every card, not just 0 and 1: this host grew to four GPUs and the low indices are the
+    # busiest, so looking only at those made the watcher wait on contended cards while others sat
+    # free. PIN_GPU=<n> forces both processes onto one card.
+    local ranked=() free=() i f
+    while IFS=, read -r i f; do
+        i="${i// /}"; f="${f// /}"
+        free[$i]=$f
+        ranked+=("$f:$i")
+    done < <(nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits | tr -d ' ' | awk -F, '{print $1","$2}')
+    STATUS=""
+    for i in "${!free[@]}"; do STATUS="$STATUS gpu${i}:${free[$i]}MiB"; done
+    STATUS="${STATUS# }"
+
+    if [ -n "${PIN_GPU:-}" ]; then
+        SERVER_GPU=$PIN_GPU; SIM_GPU=$PIN_GPU
+        SF=${free[$PIN_GPU]:-0}; MF=$SF
+        STATUS="$STATUS (pinned to gpu${PIN_GPU})"
+        (( SF >= SERVER_MIN_FREE_MIB + SIM_MIN_FREE_MIB )) && return 0
+        return 1
+    fi
+
+    # freest first
+    local sorted
+    mapfile -t sorted < <(printf '%s\n' "${ranked[@]}" | sort -t: -k1,1 -rn)
+    SERVER_GPU="${sorted[0]#*:}"; SF="${sorted[0]%%:*}"
     (( SF < SERVER_MIN_FREE_MIB )) && return 1
-    if (( MF >= SIM_MIN_FREE_MIB )); then return 0; fi
-    if (( SF >= SERVER_MIN_FREE_MIB + SIM_MIN_FREE_MIB )); then SIM_GPU=$SERVER_GPU; return 0; fi
+    if (( ${#sorted[@]} > 1 )); then
+        SIM_GPU="${sorted[1]#*:}"; MF="${sorted[1]%%:*}"
+        (( MF >= SIM_MIN_FREE_MIB )) && return 0
+    fi
+    # no second card with room -- co-locate if the freest one holds both
+    if (( SF >= SERVER_MIN_FREE_MIB + SIM_MIN_FREE_MIB )); then SIM_GPU=$SERVER_GPU; MF=$SF; return 0; fi
     return 1
 }
 
